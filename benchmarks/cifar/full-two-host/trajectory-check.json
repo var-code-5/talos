@@ -1,0 +1,11 @@
+{
+  "local_run_id": "3572dc8f3026f03b2e1d87b7",
+  "separate_run_id": "c30c66da00ad46ed90695d21",
+  "rounds_compared": 50,
+  "matching_round_model_hashes": 50,
+  "final_model_matches_control": true,
+  "separate_host_audited_contributions": 100,
+  "max_weight_audit_error": 0.0,
+  "max_momentum_audit_error": 7.105427357601002e-15,
+  "initial_weight_digest": "1421fea18ecf18812c54879d5342430108fc31d6b96872cec7139fe36880815b"
+}

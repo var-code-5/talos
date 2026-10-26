@@ -1,0 +1,69 @@
+{
+  "runs": [
+    {
+      "run_id": "3572dc8f3026f03b2e1d87b7",
+      "topology": "single-host-peers",
+      "seed": 42,
+      "numerics": "fp64-portable",
+      "accuracy_percent": 62.480000000000004,
+      "test_loss": 1.0773573247004755,
+      "macro_f1": 0.621096638028652,
+      "wall_seconds": 959.1149593410082,
+      "global_samples_per_second": 521.3139417026105,
+      "rtt_mean_ms": 0.9470038616564125,
+      "rtt_median_ms": 0.7646625163033605,
+      "rtt_p95_ms": 1.669859979301691,
+      "worst_peer_rtt_p95_ms": 2.960626967251301,
+      "network_body_mib": 22.574295043945312,
+      "audit_peer_seconds": 575.9774520298233,
+      "evaluation_peer_seconds": 757.4152943603112,
+      "compute_peer_seconds": 572.7846726538264,
+      "cpu_peer_seconds": 567.105495984,
+      "peak_peer_rss_mb": 549.2265625
+    },
+    {
+      "run_id": "c30c66da00ad46ed90695d21",
+      "topology": "separate-host-peers",
+      "seed": 42,
+      "numerics": "fp64-portable",
+      "accuracy_percent": 62.480000000000004,
+      "test_loss": 1.077357324700475,
+      "macro_f1": 0.621096638028652,
+      "wall_seconds": 984.6944237650023,
+      "global_samples_per_second": 507.7717390621938,
+      "rtt_mean_ms": 72.57287321887816,
+      "rtt_median_ms": 72.45027597946319,
+      "rtt_p95_ms": 151.70260000013513,
+      "worst_peer_rtt_p95_ms": 162.9032000000734,
+      "network_body_mib": 22.76558780670166,
+      "audit_peer_seconds": 520.9118749101563,
+      "evaluation_peer_seconds": 678.0057660578968,
+      "compute_peer_seconds": 504.35917645689733,
+      "cpu_peer_seconds": 496.30859431799985,
+      "peak_peer_rss_mb": 553.90234375
+    }
+  ],
+  "paired_seed_comparisons": [
+    {
+      "seed": 42,
+      "local_runs": 1,
+      "separate_runs": 1,
+      "observed_wall_speed_ratio": 0.974022941730298,
+      "accuracy_percentage_point_difference": 0.0
+    }
+  ],
+  "configuration": {
+    "epochs": 10,
+    "train_limit": 50000,
+    "test_limit": 10000,
+    "batch_size": 32,
+    "sync_samples": 10000,
+    "threads": 1,
+    "lr": 0.001,
+    "momentum": 0.9,
+    "audit": "full",
+    "numerics": "fp64-portable",
+    "dataset_id": "bfb6bfcc0aac25ebb1f6dd1c2fd3417c6dd1a9660c11231c93a32a8fcb141438",
+    "artifact_digest": "683b6304bdf4c90f0d58877b7a0de8edfcba9a0d8823c48177a263bdd306fb1d"
+  }
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "observed_at": "2026-10-26T17:30:44.085322+00:00",
+    "event": "Initial collection CLI exited after transient No route to host; both peers continued and authenticated checks confirmed round 2 on both. Reattached collector without restarting training."
+  },
+  {
+    "observed_at": "2026-10-26T17:32:41.831542+00:00",
+    "event": "Collection connection interruption: TimeoutError: timed out"
+  }
+]
