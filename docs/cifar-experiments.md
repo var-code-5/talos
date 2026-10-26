@@ -2,21 +2,28 @@
 
 Experiment record: 26 October 2026.
 
+**Update:** The full 10-epoch Linux–Windows run has now completed. See the
+[full placement experiment](cifar-full-experiment.md) for its matched-workload
+comparison, learning curves, raw measurements, and scope for invention-disclosure
+supporting evidence. The earlier two-epoch validation remains documented below.
+
 ## Findings
 
 Two equal peers completed full CIFAR-10 training on one Linux laptop using both
 the original FP32 profile and the portable FP64 profile. Both full runs reached
 **62.48% held-out accuracy** after 10 epochs. A separate **Linux–Windows run**
 completed two epochs on 10,000 training images and reached **29.4% accuracy** on
-1,000 held-out images. Every audit in the successful portable runs passed with
+1,000 held-out images. Every audit in those initial portable runs passed with
 zero recorded weight or momentum difference, and the two peers ended with
 identical model hashes within each run.
 
-The multi-system run establishes that discovery, authenticated connections,
+The multi-system runs establish that discovery, authenticated connections,
 training, independent auditing, aggregation, and evaluation work across the two
-tested machines. A full, workload-matched two-system experiment is still pending;
-these results do **not** establish a distributed-training speedup or an accuracy
-penalty from distributing the work.
+tested machines. The full matched-workload run reached **62.48% accuracy**
+in **984.694 seconds**. All 100 independent contribution audits
+passed, and 50/50 aggregate round hashes matched
+the portable local control. These are single-seed observations on different
+hardware, not a statistically established distributed-training speedup.
 
 ## System and training method
 
@@ -26,7 +33,7 @@ audits the other contribution, independently computes the same sample-weighted
 average, and evaluates its aggregate model. Either peer can propose a run; there
 is no permanent master or slave. Membership stays fixed for that experiment.
 
-All three completed runs below used two peers, one PyTorch thread per peer, CPU
+All completed runs documented here used two peers, one PyTorch thread per peer, CPU
 execution, and the **process backend**. Their training processes were not running
 inside Firecracker. Firecracker/KVM isolation and CIFAR guest/host agreement were
 validated separately on Linux; those checks are not measurements of the
@@ -271,7 +278,7 @@ The original invocation used `local-reference/initial.json`; the portable
 reference contains identical initial tensor bytes.
 
 The full portable single-system control uses the following workload, with
-`--endpoint http://127.0.0.1:9111`. For the pending full two-system run, use
+`--endpoint http://127.0.0.1:9111`. For the completed full two-system run, use
 `--endpoint http://127.0.0.1:9101` instead:
 
 ```sh
@@ -303,6 +310,7 @@ the shorter validation artifact in a full-workload performance comparison.
 | Full local FP32 | `2983b5c91394a6e0f7388154` | [experiment.json](../benchmarks/cifar/local-reference/experiment.json) |
 | Full local FP64 | `3572dc8f3026f03b2e1d87b7` | [experiment.json](../benchmarks/cifar/portable-reference/experiment.json) |
 | Two-system FP64 validation | `885b687962267fcf2f412b59` | [experiment.json](../benchmarks/cifar/windows-validation/experiment.json) |
+| Full two-system FP64 | `c30c66da00ad46ed90695d21` | [experiment.json](../benchmarks/cifar/full-two-host/experiment.json) |
 
 These artifacts include per-peer environments, configuration, round metrics,
 final evaluation metrics, per-class precision/recall/F1, confusion matrices,

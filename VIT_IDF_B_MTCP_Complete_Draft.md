@@ -7,9 +7,9 @@
 **Source template:** *Invention Disclosure Format (IDF)-B*, VIT IPR & TT Cell, Document No. 02-IPR-R003, Issue 2/01.02.2024  
 **Document status:** Research-stage draft; not an issued patent, validated implementation, or patentability opinion.
 
-> **How to use this file:** Sections 1–7 are drafted in the order of the original VIT form. Sections 8–10 remain explicitly pending. Technical figures appear as Mermaid diagrams (rendered by GitHub and many Markdown editors); their complete source code is embedded here, so no separate image files are required. The appendices preserve technical analyses, example contracts, pseudocode, experiment designs, proposed metrics, alternatives, and outstanding decisions from our discussion.
+> **How to use this file:** Sections 1–7 are drafted in the order of the original VIT form. Section 8 links measured prototype results; Sections 9–10 retain their provisional assessment status. Technical figures appear as Mermaid diagrams (rendered by GitHub and many Markdown editors); their complete source code is embedded here, so no separate image files are required. The appendices preserve technical analyses, example contracts, pseudocode, experiment designs, proposed metrics, alternatives, and outstanding decisions from our discussion.
 >
-> **Integrity note:** All architectures, percentages, algorithms, threat mitigations, and experimental setups below are **proposed** unless identified as established prior art. No experimental results have been supplied, no test has been claimed to have run, and novelty has not been proven. The Indian patent search portal was identified, but CAPTCHA prevented a complete portal search during our earlier review. The prior-art table is preliminary and requires a full claim-level search.
+> **Integrity note:** Architectures, algorithms, threat mitigations, and example percentages below remain **proposed** unless explicitly identified as implemented or measured in Section 8 and its linked evidence. Local isolation/protocol checks and CIFAR training experiments have now been completed with their stated scope. Novelty has not been proven. The Indian patent search portal was identified, but CAPTCHA prevented a complete portal search during our earlier review. The prior-art table is preliminary and requires a full claim-level search.
 
 ## Table of contents
 
@@ -20,7 +20,7 @@
 - [5. Objectives of the Invention](#5-objectives-of-the-invention)
 - [6. Working Principle of the Invention](#6-working-principle-of-the-invention-in-brief)
 - [7. Detailed Description of the Invention](#7-description-of-the-invention-in-detail)
-- [8. Experimental Validation Results](#8-experimental-validation-results--pending)
+- [8. Experimental Validation Results](#8-experimental-validation-results)
 - [9. Aspects Requiring Protection](#9-what-aspects-of-the-invention-need-protection--provisional)
 - [10. Technology Readiness Level](#10-technology-readiness-level--to-be-assessed)
 - [Appendix A. Threat Model and Guarantees](#appendix-a-threat-model-and-security-guarantees)
@@ -283,11 +283,37 @@ This is a **candidate technical contribution**, not an established patentable cl
 
 ---
 
-## 8. Experimental Validation Results — Pending
+## 8. Experimental Validation Results
 
-**No experiments or benchmark results have been supplied. Do not enter invented measurements in the VIT form.**
+Measured prototype evidence is available in
+[the experiment overview](docs/cifar-experiments.md) and
+[the full matched-workload report](docs/cifar-full-experiment.md).
 
-A planned validation matrix, test methods, comparison baselines and measurement definitions are included in [Appendix G](#appendix-g-experimental-evaluation-plan). When experiments are complete, this section should include hardware specs, workload description, threat injection procedure, numerical results, uncertainty/repetition counts, and plots for detection rates, overhead and training performance.
+The full CIFAR-10 experiment used 50,000 training and 10,000 held-out images,
+10 epochs, seed 42, two equal peers, one thread per peer, portable FP64 arithmetic,
+and full independent auditing. The single-system Linux control completed in
+959.115 seconds with 62.48% accuracy. The Linux–Windows two-system run
+`c30c66da00ad46ed90695d21` completed in 984.694 seconds with
+62.48% accuracy. Both hosts trained, accepted connections,
+and independently aggregated the same contributions without a permanent master.
+All 100 two-system contribution audits passed; maximum recorded weight and
+momentum error were 0.0 and 7.105427357601002e-15.
+50/50 aggregate round hashes matched the local control.
+
+These CIFAR placement experiments used the **process backend**, not Firecracker.
+Separate [Linux Firecracker isolation and injected-fault tests](docs/tested-lab.md)
+record the boundaries and protocol scenarios tested there. Neither experiment
+establishes end-to-end hostile-worker security for arbitrary uploaded workloads.
+The current CIFAR implementation uses symmetric peers and full replay auditing;
+requester-centric arrangements and adaptive selective policies elsewhere in this
+draft are design proposals, not demonstrated features of this training run.
+
+This is a single-seed placement observation on different CPU/OS combinations,
+with a recorded collector connection interruption. It provides no statistical
+performance claim, no network-only overhead estimate, and no proof of novelty.
+The full report retains per-round learning metrics, latency and network volume,
+CPU/memory observations, artifact hashes, configuration, and limitations.
+The remaining controlled studies in Appendix G remain follow-up work.
 
 ## 9. What Aspect(s) of the Invention Need Protection? — Provisional
 
@@ -302,10 +328,12 @@ This section should **not yet be submitted as claims**. Candidate aspects to inv
 
 ## 10. Technology Readiness Level — To Be Assessed
 
-The original VIT form lists TRL 1–9. Based only on the discussion, a **concept and proposed architecture** have been documented; there is no evidence here that a proof of concept or laboratory validation has actually been completed.
-
-- **Likely discussion-stage category:** TRL 2 (*technology concept formulated*), **if** accepted by the supervisor/inventors.
-- **Do not mark TRL 3+** unless an experimental proof of concept and supporting evidence actually exist.
+A working prototype now has documented local Firecracker/protocol checks and
+single-system plus Linux–Windows CIFAR training results; see Section 8. The
+previous discussion-only characterization is superseded by this evidence.
+The supervisor/inventors should assess the appropriate TRL against the required
+criteria. No official TRL is assigned here, and these laboratory observations do
+not imply production readiness or validation of every proposed mechanism.
 
 ---
 
@@ -645,7 +673,10 @@ flowchart LR
 
 ## Appendix G. Experimental Evaluation Plan
 
-**All items below are planned, not completed. No measurements are asserted.**
+This is the broader study plan. Section 8 links the completed prototype checks
+and CIFAR placement experiments. Other rows, including adaptive-audit studies
+and controlled security/performance comparisons, remain planned; results are
+asserted only where supported by the linked measured evidence.
 
 ### G.1 Study questions and baselines
 

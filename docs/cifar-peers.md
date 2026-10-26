@@ -152,8 +152,9 @@ an additional backend, with its availability and configuration recorded explicit
 The **process backend is portable**; it does not require Linux or KVM. The pinned
 stack targets Windows x86-64 and Apple Silicon macOS 14+ (the published PyTorch
 2.13 wheel is ARM64). Intel Macs are not supported by this pinned PyTorch release.
-Native Windows/macOS validation is pending; the repository includes a three-OS CI
-matrix, and local tests cover the platform-specific metric/affinity branches.
+Native Windows execution is validated by the [full Linux–Windows experiment](cifar-full-experiment.md).
+macOS execution and the complete three-OS CI matrix remain pending; local tests
+cover the platform-specific metric/affinity branches.
 
 Windows PowerShell, using Python 3.13:
 
@@ -230,25 +231,25 @@ To collect a run started with `--no-wait` later, keep both peer applications run
 .venv-cifar/bin/python -m mtcp.cifar collect --endpoint http://127.0.0.1:9101 --run-id RUN_ID
 ```
 
-The local full-data result for this development stage is recorded in
-[cifar-local-results.md](cifar-local-results.md). The physical two-host run is
-pending the friend's application becoming reachable. Native Windows/macOS CI has
-been configured, not executed from this local workspace.
+The full single-system and physical Linux–Windows results are recorded in
+[cifar-full-experiment.md](cifar-full-experiment.md). Both placements completed
+10 epochs, all audits passed, and all 50 aggregate round hashes matched.
+The complete Windows/macOS CI matrix has not been executed from this workspace.
 
 For a cross-platform comparison, copy the control run's `initial.json` and add
 `--initial-checkpoint /path/to/initial.json` when proposing the separate-host run.
 The run configuration carries the exact initial tensor bytes to every peer,
 independent of their platform's RNG implementation. Every peer still trains and
 aggregates independently. The comparison tool rejects different initial models
-for the same seed. Full audit tolerances are `atol=1e-6`, `rtol=1e-5`; native
-cross-platform numerical behavior remains part of the pending validation.
+for the same seed. Full audit tolerances are `atol=1e-6`, `rtol=1e-5`; the tested portable profile
+passed full cross-platform auditing without relaxing these bounds.
 
-A compact measured baseline and the verified initial model are committed under
-`benchmarks/cifar/local-reference/`. To match that control trial from either laptop:
+A compact portable control and the verified initial model are committed under
+`benchmarks/cifar/portable-reference/`. To match that control trial from either laptop:
 
 ```sh
-python -m mtcp.cifar run --peers 2 --epochs 10 --seed 42 --audit full \
-  --initial-checkpoint benchmarks/cifar/local-reference/initial.json
+python -m mtcp.cifar run --peers 2 --epochs 10 --seed 42 --audit full --numerics fp64-portable \
+  --initial-checkpoint benchmarks/cifar/portable-reference/initial.json
 ```
 
 Signed multicast discovery tolerates at most ten seconds of clock skew. Keep
@@ -269,12 +270,14 @@ The shared round/checkpoint format remains float32, and restored momentum is
 promoted back to float64 before the next local round. This reduces accumulation
 of platform-specific roundoff while retaining the existing audit tolerances
 (`atol=1e-6`, `rtol=1e-5`). It is a reproducibility measure, not a mathematical
-cross-platform guarantee. Actual Windows validation follows the code update.
+cross-platform guarantee. The full Linux–Windows validation is recorded in
+[the experiment report](cifar-full-experiment.md).
 
 `fp32-native` remains an explicit profile for the original baseline and homogeneous
 experiments. The comparison tool rejects mixed numerical profiles. The original
 62.48% reference is FP32 and cannot serve as the FP64 performance baseline.
-A portable-profile control run must be measured separately.
+A separate portable-profile control and full two-host run are now measured
+and archived under `benchmarks/cifar/portable-reference/` and `full-two-host/`.
 
 After updating and restarting **both** peer applications, first check two complete
 5,000-example local rounds, including momentum restoration:

@@ -12,6 +12,7 @@ This is one observed run, not a repeated performance estimate.
 
 `experiment.json` preserves the configuration and measured per-round metrics.
 `initial.json` is the shared public random initialization. No cluster key is included.
-A full separate-host run with matching settings is still required for a placement
-comparison. The two-round Windows validation uses a smaller dataset and cannot
-provide that performance comparison.
+A full separate-host run with matching workload settings has now completed:
+see [the measured comparison](../../../docs/cifar-full-experiment.md).
+The earlier two-round Windows validation uses a smaller dataset and remains
+separate from the full-workload performance comparison.

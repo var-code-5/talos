@@ -1,7 +1,9 @@
 # Observed local CIFAR-10 result
 
-Numerical profile: **legacy `fp32-native`**. A new `fp64-portable` control is
-required for comparison with the portable cross-platform audit profile.
+Numerical profile: **legacy `fp32-native`**. A separate `fp64-portable` control
+and full two-host comparison are now available in the
+[full experiment report](cifar-full-experiment.md). This document retains the
+historical FP32 observations.
 
 Tested on 26 October 2026 using two symmetric CPU peers on one x86_64 Linux
 host, one pinned CPU/PyTorch thread each. Both used the process backend, full
@@ -52,15 +54,15 @@ The final experiment ID is `2983b5c91394a6e0f7388154`. Detailed local artifacts:
 - Per-peer round CSV/JSONL and checkpoints in `.mtcp/cifar-local/a/runs/` and
   `.mtcp/cifar-local/b/runs/`.
 
-**Physical two-host measurements are pending.** The report does not invent remote
-accuracy, latency, or speedup. Run the same configuration/seed with the friend,
-then compare that experiment artifact against this baseline. For mixed OS/hardware,
-the observed difference includes platform and hardware effects. More paired seeds
-are needed before drawing statistical performance conclusions.
+**Update:** Full physical two-host measurements have now completed using the
+portable FP64 profile. See [the full experiment](cifar-full-experiment.md).
+This legacy FP32 result is not used as its performance control. For mixed
+OS/hardware, observed differences include platform and hardware effects.
+More paired seeds are needed before drawing statistical conclusions.
 
 Validation: 29 test methods passed locally, including real CIFAR guest/host
 weight and momentum comparisons, a >230 KiB two-state vsock transfer, symmetric
 LAN discovery/training, platform-metric branches, and existing protocol/isolation
 checks. The peer status page and generated report were checked in Chromium;
-mobile peer-page overflow and JavaScript errors were absent. Native Windows/macOS
-execution and the configured CI matrix remain pending.
+mobile peer-page overflow and JavaScript errors were absent. Native Windows execution has since been validated in the portable experiments.
+macOS execution and the complete configured CI matrix remain pending.
