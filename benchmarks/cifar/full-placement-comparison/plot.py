@@ -30,5 +30,7 @@ fig.suptitle('CIFAR-10: full audited training on one versus two physical hosts\n
 out=root/'benchmarks/cifar/full-placement-comparison'
 for extension in ['svg','pdf','png']:
  fig.savefig(out/f'full-experiment.{extension}',dpi=200,metadata={'Creator':'MTCP CIFAR evidence plotting script'})
+svg=out/'full-experiment.svg'
+svg.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines())+'\n')
 plt.close(fig)
 print('Saved standalone SVG, PDF, and PNG figures.')
