@@ -25,11 +25,15 @@ def main():
     run.add_argument('--test-limit',type=int,default=10000);run.add_argument('--batch-size',type=int,default=32)
     run.add_argument('--sync-samples',type=int,default=10000);run.add_argument('--threads',type=int,default=1)
     run.add_argument('--seed',type=int,default=42);run.add_argument('--lr',type=float,default=.001)
+    run.add_argument('--initial-checkpoint',help='Use the exact initial.json artifact from the control run for a cross-platform comparison')
     run.add_argument('--momentum',type=float,default=.9);run.add_argument('--audit',choices=['full','none'],default='full')
     run.add_argument('--discovery-wait',type=float,default=60);run.add_argument('--no-wait',action='store_true')
     run.add_argument('--output',default='results/cifar')
     report=commands.add_parser('compare',help='Compare compatible experiment artifacts')
     report.add_argument('runs',nargs='+');report.add_argument('--output',default='results/cifar/comparison')
+    collection=commands.add_parser('collect',help='Collect an existing asynchronous run from the peers')
+    collection.add_argument('--endpoint',default='http://127.0.0.1:9101')
+    collection.add_argument('--run-id',required=True);collection.add_argument('--output',default='results/cifar')
     args=parser.parse_args()
     if args.command=='prepare':
         from .data import prepare as convert
@@ -54,6 +58,14 @@ def main():
     elif args.command=='compare':
         from .report import compare
         print(compare(args.runs,args.output))
+    elif args.command=='collect':
+        import os
+        from .network import call
+        from .experiment import collect
+        key=os.environ.get('MTCP_CLUSTER_KEY','')
+        if len(key)<32:raise ValueError('Set MTCP_CLUSTER_KEY to the experiment key')
+        value,_=call(args.endpoint,f'/v1/runs/{args.run_id}',key)
+        collect(value['config'],key,args.output)
 
 
 if __name__=='__main__':main()

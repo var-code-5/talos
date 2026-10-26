@@ -51,13 +51,18 @@ class Peer:
                 raise ValueError('Firecracker image lacks the matching CIFAR kernel/dataset; prepare the CIFAR image first')
             self.runner.execute(operation='probe')
         self.endpoint=None
+        for saved in self.directory.glob('runs/*/summary.json'):
+            value=json.loads(saved.read_text())
+            if value.get('status') in ('completed','failed'):
+                self.runs[value['id']]=dict(value,commits={})
 
     def description(self):
+        with self.lock:links=copy.deepcopy(self.links)
         return dict(id=self.id,name=self.name,endpoint=self.endpoint,host_id=self.capacity['host_id'],
                     resources=self.capacity,threads=self.threads,backend=self.backend,
                     dataset_id=self.manifest['dataset_id'],artifact_digest=ARTIFACT,
                     torch_version=torch.__version__,numpy_version=np.__version__,python_version=platform.python_version(),
-                    measured_links=copy.deepcopy(self.links))
+                    measured_links=links)
 
     def remember(self,peer):
         if peer['id']==self.id:return
@@ -98,7 +103,8 @@ class Peer:
     def public(self,run_id):
         with self.lock:
             run=self.runs[run_id]
-            return copy.deepcopy({k:v for k,v in run.items() if k not in ('commits','weights','optimizer_momentum')})
+            return dict(copy.deepcopy({k:v for k,v in run.items() if k not in ('commits','weights','optimizer_momentum')}),
+                        accepting_runs=self.active is None)
 
     def local_train(self,payload):
         if self.runner:
@@ -130,13 +136,18 @@ class Peer:
                 if member['id']!=self.id:
                     self.wait_for(member,f'/v1/runs/{run_id}',time.monotonic()+60,
                                   lambda value:value['status'] in ('ready','running','completed'))
-            initial=weights(model(config['seed'],self.threads));current=initial
-            run['initial_weight_digest']=hashlib.sha256(decode(initial).tobytes()).hexdigest()
-            run['status']='running';run['started_at']=time.time();started=time.perf_counter()
+            initial=config.get('initial_weights') or weights(model(config['seed'],self.threads));current=initial
+            write_json(root/'initial.json',{'weights':initial,'seed':config['seed'],
+                'model_digest':hashlib.sha256(decode(initial).tobytes()).hexdigest()})
+            with self.lock:
+                run['initial_weight_digest']=hashlib.sha256(decode(initial).tobytes()).hexdigest()
+                run['status']='running';run['started_at']=time.time()
+            started=time.perf_counter()
             per_round=max(1,config['sync_samples']//len(members));round_id=0
             shard_sizes=[len(range(i,config['train_limit'],len(members))) for i in range(len(members))]
             initial_eval=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'])
-            run['initial_evaluation']=initial_eval;totals['evaluation_seconds']+=initial_eval['evaluation_seconds']
+            with self.lock:run['initial_evaluation']=initial_eval
+            totals['evaluation_seconds']+=initial_eval['evaluation_seconds']
             for epoch in range(config['epochs']):
                 for start in range(0,max(shard_sizes),per_round):
                     if self.stop.is_set():raise RuntimeError('Peer stopped')
@@ -208,7 +219,7 @@ class Peer:
                         round_wall_seconds=round_wall,elapsed_seconds=time.perf_counter()-started,
                         local_cpu_seconds=result['cpu_seconds'],local_peak_rss_mb=result['peak_rss_mb'],
                         model_digest=hashlib.sha256(decode(current).tobytes()).hexdigest())
-                    run['rounds'].append(record)
+                    with self.lock:run['rounds'].append(record)
                     totals['network_request_body_bytes']+=round_request;totals['network_response_body_bytes']+=round_response
                     for k,v in [('audit_seconds',audit_seconds),('train_seconds',local_seconds),('evaluation_seconds',evaluation['evaluation_seconds']),('barrier_seconds',barrier_seconds),('cpu_seconds',result['cpu_seconds']),('samples',count)]:totals[k]+=v
                     with open(root/'rounds.jsonl','a') as stream:stream.write(json.dumps(record,allow_nan=False)+'\n')
@@ -216,14 +227,15 @@ class Peer:
                     print(f"{self.name}: epoch {epoch+1}/{config['epochs']} round {round_id} accuracy={evaluation['test_accuracy']:.2%} loss={evaluation['test_loss']:.4f}",flush=True)
                     round_id+=1
             elapsed=time.perf_counter()-started
-            run.update(status='completed',finished_at=time.time(),wall_seconds=elapsed,final_evaluation=evaluation,
-                totals=totals,rtt_ms=distribution(rtts),local_training_samples_per_second=totals['samples']/elapsed,
-                global_training_samples_per_second=config['train_limit']*config['epochs']/elapsed,
-                final_model_digest=hashlib.sha256(decode(current).tobytes()).hexdigest(),
-                environment=dict(torch=torch.__version__,numpy=np.__version__,python=platform.python_version(),platform=platform.platform()),
-                topology='single-host-peers' if len({p['host_id'] for p in members})==1 else 'separate-host-peers')
+            with self.lock:
+                run.update(status='completed',finished_at=time.time(),wall_seconds=elapsed,final_evaluation=evaluation,
+                    totals=totals,rtt_ms=distribution(rtts),rtt_samples_ms=rtts,local_training_samples_per_second=totals['samples']/elapsed,
+                    global_training_samples_per_second=config['train_limit']*config['epochs']/elapsed,
+                    final_model_digest=hashlib.sha256(decode(current).tobytes()).hexdigest(),
+                    environment=dict(torch=torch.__version__,numpy=np.__version__,python=platform.python_version(),platform=platform.platform()),
+                    topology='single-host-peers' if len({p['host_id'] for p in members})==1 else 'separate-host-peers')
         except Exception as exc:
-            run.update(status='failed',error=str(exc),finished_at=time.time())
+            with self.lock:run.update(status='failed',error=str(exc),finished_at=time.time())
             print(f'{self.name}: run failed: {exc}',flush=True)
         finally:
             write_json(root/'summary.json',self.public(run_id));export_rounds(root/'rounds.csv',run['rounds'])
@@ -237,10 +249,13 @@ def validate_config(config):
         value=config.get(key)
         if type(value) not in (int,float) or not math.isfinite(value) or not low<=value<high or (key=='lr' and value==0):raise ValueError(f'Invalid {key}')
     if config.get('audit') not in ('full','none'):raise ValueError('Unknown audit policy')
+    if config.get('initial_weights') is not None:decode(config['initial_weights'])
     members=config.get('members',[])
     if not 1<=len(members)<=8 or len({p['id'] for p in members})!=len(members):raise ValueError('Invalid membership')
     if config['train_limit']<len(members):raise ValueError('Too few samples for membership')
     if config['sync_samples']<len(members):raise ValueError('Sync samples must cover all peers')
+    planned_rounds=config['epochs']*math.ceil(math.ceil(config['train_limit']/len(members))/(config['sync_samples']//len(members)))
+    if planned_rounds>500:raise ValueError('This prototype supports at most 500 rounds; increase --sync-samples')
     if members!=sorted(members,key=lambda p:p['id']):raise ValueError('Membership ordering must be deterministic')
     if not isinstance(config.get('run_id'),str) or not config['run_id'].isalnum() or len(config['run_id'])>64:raise ValueError('Invalid run ID')
 
@@ -257,6 +272,23 @@ def handler_for(peer):
         def authorized(self):
             return secrets.compare_digest(self.headers.get('Authorization',''),f'Bearer {peer.key}')
         def do_GET(self):
+            if self.path in ('/','/ui/cifar.js','/ui/cifar.css'):
+                name={'/':'cifar.html','/ui/cifar.js':'cifar.js','/ui/cifar.css':'cifar.css'}[self.path]
+                content=(Path(__file__).resolve().parents[2]/'web'/name).read_bytes()
+                kind={'cifar.html':'text/html; charset=utf-8','cifar.js':'text/javascript','cifar.css':'text/css'}[name]
+                self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(content)))
+                self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'")
+                self.end_headers();self.wfile.write(content);return
+            if self.path=='/v1/status':
+                with peer.lock:
+                    summaries=[]
+                    for run in sorted(peer.runs.values(),key=lambda r:r['created_at'],reverse=True):
+                        summaries.append(dict(id=run['id'],status=run['status'],error=run.get('error'),
+                            rounds=len(run['rounds']),latest=run['rounds'][-1] if run['rounds'] else None,
+                            epochs=run['config']['epochs'],train_limit=run['config']['train_limit'],
+                            peers=len(run['config']['members']),audit=run['config']['audit'],
+                            backend=run['peer']['backend']))
+                self.send({'self':peer.description(),'peers':peer.members(),'runs':summaries},authenticated=False);return
             if self.path=='/health':self.send({'status':'ok'},authenticated=False);return
             if self.path=='/v1/resources':self.send(peer.description(),authenticated=False);return
             if self.path=='/v1/peers':self.send({'peers':peer.members()},authenticated=False);return
@@ -267,7 +299,8 @@ def handler_for(peer):
                 if len(parts)==5 and parts[:2]==['v1','runs'] and parts[3]=='rounds':
                     with peer.lock:
                         run=peer.runs[parts[2]];commit=run['commits'].get(parts[4])
-                        self.send({'ready':commit is not None,'commit':commit,'status':run['status'],'error':run.get('error')});return
+                        response={'ready':commit is not None,'commit':commit,'status':run['status'],'error':run.get('error')}
+                    self.send(response);return
                 self.send({'error':'Not found'},404)
             except KeyError:self.send({'error':'Unknown run'},404)
         def do_POST(self):
@@ -279,6 +312,13 @@ def handler_for(peer):
                 value=json.loads(self.rfile.read(length))
                 if self.path=='/v1/hello':peer.remember(value['peer']);self.send({'peer':peer.description()})
                 elif self.path=='/v1/ping':self.send({'echo':value,'peer_id':peer.id})
+                elif self.path=='/v1/initialize':
+                    seed=value.get('seed')
+                    if type(seed) is not int or not 0<=seed<2**31:raise ValueError('Invalid seed')
+                    with peer.lock:
+                        if peer.active is not None:raise ValueError('An experiment is already active')
+                        initial=weights(model(seed,peer.threads))
+                    self.send({'weights':initial,'seed':seed})
                 elif self.path=='/v1/bandwidth':
                     count=value.get('download_bytes',0)
                     if type(count) is not int or not 0<=count<=131072:raise ValueError('Invalid probe size')
@@ -314,10 +354,11 @@ def serve(args):
                         _,ping=call(member['endpoint'],'/v1/ping',key,{'nonce':secrets.token_hex(16)})
                         _,down=call(member['endpoint'],'/v1/bandwidth',key,{'download_bytes':131072})
                         _,up=call(member['endpoint'],'/v1/bandwidth',key,{'padding':'x'*131072})
-                        peer.links[member['id']]=dict(rtt_ms=ping['seconds']*1000,
-                            upload_mbps=up['request_body_bytes']*8/up['seconds']/1e6,
-                            download_mbps=down['response_body_bytes']*8/down['seconds']/1e6,
-                            measured_at=time.time(),method='128 KiB authenticated HTTP body transfers, including RTT')
+                        with peer.lock:
+                            peer.links[member['id']]=dict(rtt_ms=ping['seconds']*1000,
+                                upload_mbps=up['request_body_bytes']*8/up['seconds']/1e6,
+                                download_mbps=down['response_body_bytes']*8/down['seconds']/1e6,
+                                measured_at=time.time(),method='128 KiB authenticated HTTP body transfers, including RTT')
                     except (OSError,ValueError,KeyError):pass
             peer.stop.wait(2)
     if not args.no_discovery:

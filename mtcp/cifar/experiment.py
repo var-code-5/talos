@@ -19,7 +19,10 @@ def start(args):
     if len(key)<32:raise ValueError('Set MTCP_CLUSTER_KEY to the peers\' shared experiment key')
     deadline=time.monotonic()+args.discovery_wait
     while True:
-        members=public(args.endpoint,'/v1/peers')['peers']
+        try:
+            members=public(args.endpoint,'/v1/peers')['peers']
+        except OSError:
+            members=[]
         if len(members)>=args.peers:break
         if time.monotonic()>deadline:raise TimeoutError(f'Only {len(members)} peers discovered; expected {args.peers}. Start the other app or use --connect.')
         time.sleep(.5)
@@ -33,12 +36,21 @@ def start(args):
         verified.append(value['peer'])
     members=sorted(verified,key=lambda p:p['id'])
     first=members[0]
+    if any(p['threads']!=args.threads for p in members):
+        raise ValueError('Every peer must advertise the requested PyTorch thread allocation')
     if any(p['dataset_id']!=first['dataset_id'] or p['artifact_digest']!=first['artifact_digest'] for p in members):
         raise ValueError('Peers must have the same prepared dataset and training source')
+    initial_path=getattr(args,'initial_checkpoint',None)
+    if initial_path:
+        initial=json.loads(Path(initial_path).read_text())['weights']
+    else:
+        # Agree on exact initial tensor bytes, avoiding CPU/OS RNG-kernel differences.
+        value,_=call(args.endpoint,'/v1/initialize',key,{'seed':args.seed})
+        initial=value['weights']
     config=dict(run_id=secrets.token_hex(12),members=members,epochs=args.epochs,train_limit=args.train_limit,
         test_limit=args.test_limit,batch_size=args.batch_size,sync_samples=args.sync_samples,
         threads=args.threads,seed=args.seed,lr=args.lr,momentum=args.momentum,audit=args.audit,
-        dataset_id=first['dataset_id'],artifact_digest=first['artifact_digest'])
+        dataset_id=first['dataset_id'],artifact_digest=first['artifact_digest'],initial_weights=initial)
     for member in members:call(member['endpoint'],'/v1/runs',key,config)
     print(f"Started {config['run_id']} on {len(members)} equal peers; no peer is a permanent coordinator",flush=True)
     if args.no_wait:return config['run_id']
@@ -57,7 +69,7 @@ def collect(config,key,output):
         if any(s['status']=='failed' for s in states):
             write_json(Path(output)/run_id/'experiment.json',{'config':config,'peers':states,'status':'failed'})
             raise RuntimeError(str([s.get('error') for s in states if s['status']=='failed']))
-        if all(s['status']=='completed' for s in states):break
+        if all(s['status']=='completed' and s.get('accepting_runs',True) for s in states):break
         time.sleep(1)
     else:raise TimeoutError('Experiment collection timed out; peers continue independently')
     digests={s['final_model_digest'] for s in states}

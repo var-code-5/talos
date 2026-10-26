@@ -59,6 +59,8 @@ class PeerTests(unittest.TestCase):
                     seed=42,lr=.001,momentum=.9,audit='full',no_wait=False,output=str(Path(temporary)/'results'))
                 artifact=start(args);result=json.loads(Path(artifact).read_text())
                 self.assertTrue(result['peer_models_identical']);self.assertEqual(result['topology'],'single-host-peers')
+                self.assertIn('initial_weights',result['config'])
+                self.assertEqual(len({p['initial_weight_digest'] for p in result['peers']}),1)
                 for peer in result['peers']:
                     self.assertEqual(peer['totals']['samples'],128)
                     self.assertEqual(len(peer['rounds']),4)
@@ -69,11 +71,23 @@ class PeerTests(unittest.TestCase):
                 # Proposal retries are idempotent and do not repeat training.
                 again,_=call(endpoints[0],'/v1/runs',key,result['config'])
                 self.assertEqual(again['status'],'completed')
+                collected=subprocess.run([sys.executable,'-m','mtcp.cifar','collect','--endpoint',endpoints[0],
+                    '--run-id',result['config']['run_id'],'--output',str(Path(temporary)/'collected')],
+                    env=env,capture_output=True,text=True,timeout=15)
+                self.assertEqual(collected.returncode,0,collected.stderr)
                 report=compare([artifact],str(Path(temporary)/'comparison'))
                 self.assertIn('Physical two-host results are pending',Path(report).read_text())
                 bad=json.loads(Path(artifact).read_text());bad['config']['batch_size']=32
                 bad_path=Path(temporary)/'bad.json';bad_path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-comparison'))
+                bad=json.loads(Path(artifact).read_text())
+                for peer in bad['peers']:peer['initial_weight_digest']='0'*64
+                bad_path.write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-initial'))
+                status=public(endpoints[0],'/v1/status')
+                self.assertEqual(status['runs'][0]['rounds'],4)
+                with urllib.request.urlopen(endpoints[0]) as response:
+                    self.assertIn(b'Every peer trains.',response.read())
             finally:
                 for process in processes:process.terminate()
                 for process in processes:process.wait(timeout=10)
