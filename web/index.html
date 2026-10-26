@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTCP / Compute lab</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="rail">
+    <a class="brand" href="/" aria-label="MTCP home"><span class="brand-icon">m</span><span>mtcp<span class="brand-sub">Compute lab</span></span></a>
+    <div class="rail-body"><span class="rail-caption">Workspace</span>
+    <a class="nav active" href="#overview"><span>◈</span> Training lab</a>
+    <a class="nav" href="#tasks"><span>▤</span> Work units</a>
+    <a class="nav" href="#activity"><span>≋</span> Protocol log</a>
+    <a class="nav" href="#runs"><span>◷</span> Run history</a></div>
+    <div class="rail-foot"><span class="status-dot"></span> Local research environment<p>Fixed Python kernel<br>CPU execution only</p></div>
+  </aside>
+  <main id="overview">
+    <header class="topbar"><span>Workspace <span class="slash">/</span> Training lab</span><span id="connection" class="connection">Connecting…</span></header>
+    <div class="page">
+      <div class="heading"><div><div class="project-label">Mutual-Trust Compute Protocol</div><h1>Shared compute.<br>Independent verification.</h1><p>Train one model across connected participants.<br>Inspect every contribution before the model moves forward.</p></div><div class="heading-mark" aria-hidden="true"><span></span><span></span><span></span><i></i></div></div>
+      <div class="notice"><span class="notice-icon">i</span><p><strong>Local compute cluster.</strong> Each volunteer accepts authenticated inbound connections and advertises its resource budget. Choose KVM isolation to train inside fresh Firecracker microVMs.</p></div>
+      <section class="panel resource-panel"><div class="panel-title"><div><h2>Node discovery</h2><p>Owner-offered budgets and measured coordinator-to-node HTTP throughput. Local nodes share one physical host.</p></div><span id="cluster-total" class="tag">Discovering</span></div><div class="table-scroll"><table><thead><tr><th>Node / inbound endpoint</th><th>Offered compute</th><th>Memory</th><th>Bandwidth budget ↑ / ↓</th><th>Measured ↑ / ↓</th><th>Connection</th></tr></thead><tbody id="resource-rows"></tbody></table></div></section><div class="lab-layout">
+        <section class="panel experiment"><div class="panel-title"><h2>Configure a run</h2><span class="tag">Linear regression</span></div>
+          <form id="run-form">
+            <label for="scenario">Volunteer behavior</label><select id="scenario"><option value="honest">Honest contributions</option><option value="corrupt">Inject a corrupted gradient</option><option value="replay">Replay an old model version</option><option value="timeout">Miss an assignment deadline</option></select>
+            <p class="field-help">Fault scenarios affect the last selected volunteer at step 3.</p>
+            <label for="audit">Verification policy</label><select id="audit"><option value="full">Full independent audit · 100%</option><option value="adaptive">Adaptive audit · 60% → 15%</option></select>
+            <p class="field-help" id="audit-help">Recompute every remote gradient on the requester.</p>
+            <div class="form-pair"><div><label for="steps">Training steps</label><input id="steps" type="number" value="24" min="4" max="80" required></div><div><label>Samples per step</label><div class="fixed-input">1,000</div></div></div>
+            <label for="isolation">Required isolation</label><select id="isolation"><option value="bounded-process">Bounded fixed-kernel process</option><option value="kvm-microvm">Firecracker KVM microVM</option></select>
+            <button id="start" class="primary" type="submit"><span>▷</span> Start training</button>
+            <button id="stop" class="secondary hidden" type="button">Stop run</button>
+            <p id="form-error" role="alert"></p>
+          </form>
+          <div class="data-note"><span class="small-icon">⌁</span><div><strong>A small, inspectable workload</strong><p>Fit y = w₁x₁ + w₂x₂ + b to 1,000 deterministic samples. No uploaded code or private data.</p></div></div>
+        </section>
+        <div class="live-area">
+          <section class="panel topology"><div class="panel-title"><h2>Compute participants</h2><div class="run-state"><button id="live-view" class="detail-button hidden" type="button">Show latest run</button><span id="run-status" class="tag">Ready</span></div></div>
+            <div class="nodes"><article class="node requester"><div class="node-head"><span class="device">▣</span><span class="node-role">Requester</span><span class="status-dot"></span></div><h3>Your machine</h3><p>Train + verify + aggregate</p><div class="node-bottom"><strong>400</strong><span>samples / step</span></div></article><div class="node-link" aria-hidden="true">⇄</div><article class="node" id="node-a"><div class="node-head"><span class="device">▱</span><span class="node-role">Volunteer A</span><span class="status-dot offline"></span></div><h3>Waiting for worker</h3><p>Bounded Python process</p><div class="node-bottom"><strong>300</strong><span>samples / step</span></div></article><div class="node-link" aria-hidden="true">⇄</div><article class="node" id="node-b"><div class="node-head"><span class="device">▱</span><span class="node-role">Volunteer B</span><span class="status-dot offline"></span></div><h3>Waiting for worker</h3><p>Bounded Python process</p><div class="node-bottom"><strong>300</strong><span>samples / step</span></div></article></div>
+            <div class="flow-caption"><span class="flow-line"></span> Common checkpoint <b>→</b> Committed gradients <b>→</b> Verification gate <b>→</b> Weighted update</div>
+          </section>
+          <div class="stats"><div><span>Model version</span><strong id="model-version">v0</strong><small id="step-count">No run started</small></div><div><span>Accepted remote</span><strong id="accepted-count">0</strong><small id="audit-count">0 independently audited</small></div><div><span>Rejected / recovered</span><strong id="rejected-count">0 / 0</strong><small id="rejection-note">Invalid results excluded</small></div></div>
+          <section class="panel training"><div class="panel-title"><div><h2>Training loss</h2><p>Mean squared error on the full training set</p></div><div class="loss-value"><strong id="loss-value">—</strong><span id="loss-change">Awaiting first run</span></div></div>
+            <div id="chart-empty" class="chart-empty">Start a run to see the model learn.<span>Loss is measured after every aggregated update.</span></div><svg id="loss-chart" class="hidden" viewBox="0 0 700 195" role="img" aria-label="Training loss by model version"></svg>
+            <div class="chart-footer"><span><i class="legend-dot"></i>Measured training loss</span><span id="weights">Target weights: 2.4, −1.7, 0.6</span></div>
+          </section>
+        </div>
+      </div>
+      <section class="panel work-panel" id="tasks"><div class="panel-title"><div><h2>Work units</h2><p>Each remote result is bound to its assignment, input, artifact, and model version.</p></div><a href="/api/export" class="export" download="mtcp-run.json">↓ Export run</a></div><div class="table-scroll"><table><thead><tr><th>Work unit</th><th>Participant</th><th>Model</th><th>Samples</th><th>Decision</th><th>Verification</th><th>Details</th></tr></thead><tbody id="task-rows"><tr><td colspan="7" class="empty-cell">No work units yet. Start training to create the first assignments.</td></tr></tbody></table></div><div id="task-pagination" class="pagination hidden"><button id="previous-page" class="secondary">Previous</button><span id="page-label"></span><button id="next-page" class="secondary">Next</button></div></section>
+      <div class="bottom-grid"><section class="panel" id="activity"><div class="panel-title"><h2>Protocol log</h2><span class="tag">Live events</span></div><div id="event-list" class="event-list"><p class="empty-log">Admission, verification, and recovery events will appear here.</p></div></section><section class="panel" id="runs"><div class="panel-title"><h2>Run history</h2><span id="run-total" class="tag">0 runs</span></div><div id="run-list" class="run-list"><p class="empty-log">Completed runs are saved locally in SQLite.</p></div></section></div>
+      <footer>MTCP research prototype <span>Authentication ≠ correctness. Sampled audits carry residual risk.</span></footer>
+    </div>
+  </main>
+  <dialog id="task-detail"><div class="dialog-heading"><h2>Assignment details</h2><button id="close-detail" aria-label="Close details">×</button></div><p>Authenticated contract and recorded acceptance decision.</p><pre id="detail-json"></pre></dialog>
+  <script src="/app.js"></script>
+</body></html>
