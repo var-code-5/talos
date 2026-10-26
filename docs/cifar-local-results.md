@@ -1,5 +1,8 @@
 # Observed local CIFAR-10 result
 
+Numerical profile: **legacy `fp32-native`**. A new `fp64-portable` control is
+required for comparison with the portable cross-platform audit profile.
+
 Tested on 26 October 2026 using two symmetric CPU peers on one x86_64 Linux
 host, one pinned CPU/PyTorch thread each. Both used the process backend, full
 independent auditing, PyTorch 2.13.0+cpu, NumPy 2.5.2, and seed 42.
@@ -38,7 +41,7 @@ with other applications running, not a controlled throughput benchmark.
 
 An earlier full run before the portability refactor also reached 62.48% and the
 same final checkpoint. That is a reproducibility check, not a multi-seed estimate
-of training variance. The recorded final baseline uses the portable kernel hash
+of training variance. The recorded final baseline uses the kernel hash
 `c23272ff1ae2c92278a061a433a2a9c25b25ed7c9c29f77ae03b5d4c12072437`.
 
 The final experiment ID is `2983b5c91394a6e0f7388154`. Detailed local artifacts:

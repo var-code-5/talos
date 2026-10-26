@@ -1,5 +1,7 @@
 # Observed local control run
 
+Numerical profile: **legacy `fp32-native`**. This is not an FP64 control run.
+
 These are measured artifacts from experiment `2983b5c91394a6e0f7388154`, not
 synthetic or physical two-host results. Two equal CPU peers ran on one Linux
 laptop with seed 42, full independent auditing, all CIFAR-10 training/test images,
