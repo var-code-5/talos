@@ -29,13 +29,26 @@ A separately tested deliberately corrupted update is still rejected.
 
 Local real-data tests cover 5,000-example replays at different CPU thread counts,
 a second round with restored momentum, equal-peer training, and host/Firecracker
-guest agreement. All 31 local test methods passed. The actual updated Windows
-peer still needs the short cross-platform validation run; this document does not
-claim that result before it is observed.
+guest agreement. All 31 local test methods passed. The two peer regression tests also passed
+after the DHCP address-refresh repair.
+
+The actual Windows/Linux validation `885b687962267fcf2f412b59` subsequently
+completed with `fp64-portable`: two epochs, 10,000 training images, 1,000 test
+images, seed 42, and full audits. Windows (Python 3.13.17) and Linux (Python
+3.13.7) both used PyTorch 2.13.0+cpu and NumPy 2.5.2. Both peers passed both
+rounds with zero weight and momentum differences and identical final models.
+Wall time was 25.3615 seconds and held-out accuracy was 29.4%. Mean measured
+HTTP RTTs were 34.47 ms from Windows and 82.55 ms from Linux (two samples per
+peer; these are sparse observations, not a network latency estimate).
+
+The source measurements are saved locally in
+`results/cifar/windows-portable-validation/885b687962267fcf2f412b59/experiment.json`.
+This confirms the tested Windows/Linux configuration; it is not a guarantee for
+all hardware or software combinations.
 
 The historical 62.48% FP32 performance reference remains valid for its original
-profile. It must not be compared against the new FP64 profile. A separate FP64
-control is being measured. Numerical-profile mismatches are rejected by the
+profile. It must not be compared against the new FP64 profile. A separate [full FP64 control](../benchmarks/cifar/portable-reference/README.md)
+completed with 62.48% accuracy in 959.115 seconds. Numerical-profile mismatches are rejected by the
 comparison tool.
 
 Future failures preserve submitted local states under `commits/` and per-round
