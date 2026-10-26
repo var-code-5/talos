@@ -18,15 +18,24 @@ def mount(source, target, kind):
 
 
 def calculate(request):
-    resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
-    resource.setrlimit(resource.RLIMIT_AS, (96 * 1024**2, 96 * 1024**2))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    cifar = request.get("operation") == "cifar-train"
+    cpu_limit = 120 if cifar else 2
+    address_limit = 4 * 1024**3 if cifar else 96 * 1024**2
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
+    resource.setrlimit(resource.RLIMIT_AS, (address_limit, address_limit))
+    file_limit = 16 * 1024**2 if cifar else 0
+    resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     os.setgroups([])
     os.setgid(65534)
     os.setuid(65534)
     # No new privilege gain through exec, even within the guest.
     ctypes.CDLL(None).prctl(38, 1, 0, 0, 0)
+    if cifar:
+        sys.path.insert(0, "/opt/app")
+        os.environ.update(HOME="/tmp", TMPDIR="/tmp", TORCH_HOME="/tmp/torch")
+        from mtcp.cifar.training import train
+        return train(request["payload"], "/data")
     if request.get("operation") == "probe":
         checks = dict(uid=os.getuid(), interfaces=os.listdir("/sys/class/net"),
                       kernel=os.uname().release, pid=os.getpid(), vcpus=os.cpu_count(),
@@ -69,14 +78,16 @@ def calculate(request):
 def main():
     mount("proc", "/proc", "proc")
     mount("sysfs", "/sys", "sysfs")
+    mount("tmpfs", "/tmp", "tmpfs")
+    os.chmod("/tmp", 0o1777)
     listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     listener.bind((socket.VMADDR_CID_ANY, 5000))
     listener.listen(1)
     connection, _ = listener.accept()
     with connection:
         stream = connection.makefile("rwb", buffering=0)
-        raw = stream.readline(16385)
-        if len(raw) > 16384 or not raw.endswith(b"\n"):
+        raw = stream.readline(1048577)
+        if len(raw) > 1048576 or not raw.endswith(b"\n"):
             return
         request = json.loads(raw)
         reader, writer = os.pipe()
@@ -89,15 +100,16 @@ def main():
                 result = calculate(request)
             except Exception as exc:
                 result = {"error": str(exc)}
-            os.write(writer, json.dumps(result, allow_nan=False).encode())
+            with os.fdopen(writer, "wb") as output:
+                output.write(json.dumps(result, allow_nan=False).encode())
             os._exit(0)
         os.close(writer)
         with os.fdopen(reader, "rb") as pipe:
-            result = pipe.read(16384)
+            result = pipe.read(1048576)
         _, status = os.waitpid(pid, 0)
         if status or not result:
             result = json.dumps({"error": "Guest task terminated by resource limit", "wait_status": status}).encode()
-        stream.write(result + b"\n")
+        connection.sendall(result + b"\n")
     # Keep PID 1 alive until the controller tears down the VM.
     while True:
         import time

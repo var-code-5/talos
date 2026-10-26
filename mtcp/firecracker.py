@@ -96,9 +96,9 @@ class Firecracker:
                         raise TimeoutError("Firecracker boot deadline exceeded")
                     with sock, stream:
                         sock.settimeout(max(.01, timeout - (time.monotonic() - started)))
-                        stream.write(json.dumps(dict(operation=operation, payload=payload, sentinel=sentinel)).encode() + b"\n")
-                        raw = stream.readline(16385)
-                        if len(raw) > 16384 or not raw.endswith(b"\n"):
+                        sock.sendall(json.dumps(dict(operation=operation, payload=payload, sentinel=sentinel)).encode() + b"\n")
+                        raw = stream.readline(1048577)
+                        if len(raw) > 1048576 or not raw.endswith(b"\n"):
                             raise RuntimeError("Invalid guest response")
                         result = json.loads(raw)
                         if "error" in result:

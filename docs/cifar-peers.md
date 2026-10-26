@@ -188,3 +188,38 @@ peers require the same PyTorch base version and NumPy version.
 The **Firecracker backend requires Linux/KVM** and is rejected explicitly on
 Windows/macOS. See the [Firecracker prerequisites](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md)
 and [PyTorch platform installation documentation](https://pytorch.org/get-started/locally/).
+
+## Firecracker CIFAR backend on Linux
+
+The CIFAR image is separate from the small linear-regression image. It contains
+CPU-only PyTorch, the fixed CIFAR kernel, and the checksum-verified public data:
+
+```sh
+python3 tools/firecracker/prepare.py
+.venv-cifar/bin/python tools/firecracker/prepare_cifar.py
+.venv-cifar/bin/python -m mtcp peer --name linux-peer --backend firecracker --memory-mb 768
+```
+
+Use that backend on **both peers** when comparing placements. Each local-SGD round
+runs in a fresh read-only-root guest, with guest-only writable temporary storage,
+no network device, a bounded vsock channel, unprivileged task execution, and the
+host VMM namespace/cgroup controls. The controller enforces a 120-second guest
+wall deadline. Model and optimizer momentum use bounded float32/base64 frames;
+large (>230 KiB) two-state transfers are tested without pickle.
+
+This image uses disk-backed temporary build space under `.mtcp/build-tmp`, since
+its rootfs archive can exceed a `/tmp` memory-filesystem quota. Docker is used to
+construct the runtime image; it is not the execution isolation boundary.
+
+The real-guest test compares host and guest weights/momentum and then transfers
+both into another fresh guest. The full 10-epoch baseline recorded for this stage
+uses the **process backend**; it is not presented as a full Firecracker benchmark.
+
+```sh
+MTCP_TEST_FIRECRACKER=1 .venv-cifar/bin/python -m unittest discover -s tests -v
+```
+
+Open `http://localhost:9101` for the peer's resource, discovery, and experiment
+status page. It restores completed local summaries after restart. Run control
+continues to require the experiment key through the CLI. The older linear demo
+at port 8087 is independent from this equal-peer CIFAR application.
