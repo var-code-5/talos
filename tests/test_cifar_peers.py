@@ -84,6 +84,9 @@ class PeerTests(unittest.TestCase):
                 for peer in bad['peers']:peer['initial_weight_digest']='0'*64
                 bad_path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-initial'))
+                bad=json.loads(Path(artifact).read_text());bad['config']['members'][0]['torch_version']='0.0.0'
+                bad_path.write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-framework'))
                 status=public(endpoints[0],'/v1/status')
                 self.assertEqual(status['runs'][0]['rounds'],4)
                 with urllib.request.urlopen(endpoints[0]) as response:

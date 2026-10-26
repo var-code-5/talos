@@ -14,12 +14,16 @@ def compare(paths,destination):
     if not runs:raise ValueError('Supply at least one completed experiment')
     reference=runs[0]['config'];peers=len(reference['members'])
     initial_digest=runs[0]['peers'][0]['initial_weight_digest']
+    torch_base=reference['members'][0]['torch_version'].split('+')[0]
+    numpy_version=reference['members'][0]['numpy_version']
     for run in runs:
         if run['status']!='completed' or not run['peer_models_identical']:raise ValueError('Only completed, internally consistent runs can be compared')
         if any(run['config'][key]!=reference[key] for key in CONFIG_FIELDS) or len(run['config']['members'])!=peers:
             raise ValueError('Workload configurations differ; comparison would be confounded')
         if [p['backend'] for p in run['config']['members']]!=[p['backend'] for p in reference['members']]:
             raise ValueError('Isolation backends differ')
+        if any(p['torch_version'].split('+')[0]!=torch_base or p['numpy_version']!=numpy_version for p in run['config']['members']):
+            raise ValueError('PyTorch or NumPy versions differ between experiments')
         if any(p['initial_weight_digest']!=initial_digest for p in run['peers']):
             # Different seeds legitimately select different initial models; pair within seed.
             same_seed=next((other for other in runs if other['config']['seed']==run['config']['seed']),run)
