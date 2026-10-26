@@ -253,3 +253,42 @@ python -m mtcp.cifar run --peers 2 --epochs 10 --seed 42 --audit full \
 
 Signed multicast discovery tolerates at most ten seconds of clock skew. Keep
 system clocks synchronized, or use the authenticated `--connect` fallback.
+
+## Cross-platform full audits and numerical profiles
+
+The first Windows/Linux full-data attempt exposed a native FP32 replay mismatch.
+The same Linux update reproduced exactly, while recomputing the Windows update
+on Linux differed by a maximum `0.000218` in weights and `0.005270` in optimizer
+momentum after 157 local SGD batches. Matching source, seed, and dataset does not
+guarantee equal floating-point paths across operating systems/CPU libraries.
+See [PyTorch's reproducibility notes](https://docs.pytorch.org/docs/stable/notes/randomness.html).
+
+New runs default to **`--numerics fp64-portable`**: input normalization, forward /
+backward operations, and SGD momentum arithmetic use float64; MKLDNN is disabled.
+The shared round/checkpoint format remains float32, and restored momentum is
+promoted back to float64 before the next local round. This reduces accumulation
+of platform-specific roundoff while retaining the existing audit tolerances
+(`atol=1e-6`, `rtol=1e-5`). It is a reproducibility measure, not a mathematical
+cross-platform guarantee. Actual Windows validation follows the code update.
+
+`fp32-native` remains an explicit profile for the original baseline and homogeneous
+experiments. The comparison tool rejects mixed numerical profiles. The original
+62.48% reference is FP32 and cannot serve as the FP64 performance baseline.
+A portable-profile control run must be measured separately.
+
+After updating and restarting **both** peer applications, first check two complete
+5,000-example local rounds, including momentum restoration:
+
+```sh
+python -m mtcp.cifar run --peers 2 --epochs 2 --train-limit 10000 \
+  --test-limit 1000 --sync-samples 10000 --audit full --numerics fp64-portable \
+  --initial-checkpoint benchmarks/cifar/local-reference/initial.json
+```
+
+Then use the full 10-epoch command with the same numerical profile. There are no
+new dependencies or dataset conversions for this update. Firecracker users must
+rebuild the CIFAR guest image because the execution artifact changed.
+
+Audit failure messages now include maximum errors. Per-round evidence is saved
+under the peer's `runs/RUN_ID/audits/`, and submitted local states are persisted in
+`commits/` for investigation after restart. No failed audited update is aggregated.
