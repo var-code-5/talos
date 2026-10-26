@@ -52,18 +52,27 @@ class Peer:
                 raise ValueError('Firecracker image lacks the matching CIFAR kernel/dataset; prepare the CIFAR image first')
             self.runner.execute(operation='probe')
         self.endpoint=None
+        self.auto_advertise=False
+        self.http_port=None
         for saved in self.directory.glob('runs/*/summary.json'):
             value=json.loads(saved.read_text())
             if value.get('status') in ('completed','failed'):
                 self.runs[value['id']]=dict(value,commits={})
 
     def description(self):
-        with self.lock:links=copy.deepcopy(self.links)
+        with self.lock:
+            self.refresh_endpoint()
+            links=copy.deepcopy(self.links)
         return dict(id=self.id,name=self.name,endpoint=self.endpoint,host_id=self.capacity['host_id'],
                     resources=self.capacity,threads=self.threads,backend=self.backend,
                     dataset_id=self.manifest['dataset_id'],artifact_digest=ARTIFACT,
                     torch_version=torch.__version__,numpy_version=np.__version__,python_version=platform.python_version(),
                     measured_links=links,numerics_supported=list(NUMERICS))
+
+    def refresh_endpoint(self):
+        # A run's membership is fixed. Refresh DHCP changes only between runs.
+        if self.auto_advertise and self.http_port is not None and self.active is None:
+            self.endpoint=f'http://{discover_host()}:{self.http_port}'
 
     def remember(self,peer):
         if peer['id']==self.id:return
@@ -358,6 +367,7 @@ def serve(args):
     affinity_enforced=pin_cpus(cpus)
     peer=Peer(args.state_dir or f'.mtcp/cifar-peer-{args.port}',args.data,key,args.name,cpus,args.threads,args.backend,args.assets,args.memory_mb,affinity_enforced)
     server=ThreadingHTTPServer((args.host,args.port),handler_for(peer));peer.endpoint=f'http://{args.advertise_host or discover_host()}:{server.server_port}'
+    peer.http_port=server.server_port;peer.auto_advertise=args.advertise_host is None
     def explicit_hello():
         while not peer.stop.is_set():
             for endpoint in args.connect:

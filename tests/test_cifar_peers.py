@@ -23,6 +23,22 @@ def port(kind=socket.SOCK_STREAM):
 
 @unittest.skipUnless(HAS_DATA and HAS_TORCH,'Requires prepared CIFAR and requirements-cifar.txt')
 class PeerTests(unittest.TestCase):
+    def test_idle_advertisement_tracks_address_changes(self):
+        from unittest.mock import patch
+        from mtcp.cifar.peer import Peer
+        peer=object.__new__(Peer)
+        peer.auto_advertise=True;peer.http_port=9101;peer.active=None
+        peer.endpoint='http://172.16.207.7:9101'
+        with patch('mtcp.cifar.peer.discover_host',return_value='172.16.203.242'):
+            peer.refresh_endpoint()
+            self.assertEqual(peer.endpoint,'http://172.16.203.242:9101')
+            peer.active='running-experiment';peer.endpoint='http://172.16.207.7:9101'
+            peer.refresh_endpoint()
+            self.assertEqual(peer.endpoint,'http://172.16.207.7:9101')
+            peer.active=None;peer.auto_advertise=False
+            peer.refresh_endpoint()
+            self.assertEqual(peer.endpoint,'http://172.16.207.7:9101')
+
     def test_symmetric_discovery_training_and_report(self):
         from argparse import Namespace
         from mtcp.cifar.experiment import start,public

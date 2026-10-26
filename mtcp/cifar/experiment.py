@@ -28,10 +28,11 @@ def start(args):
         time.sleep(.5)
     if len(members)!=args.peers:raise ValueError('Discovered membership differs from requested peer count; use a separate cluster key for this experiment')
     members=sorted(members,key=lambda p:p['id'])
+    proposing_peer=public(args.endpoint,'/v1/resources')
     # Prove endpoint/key identity and current capabilities before agreeing on membership.
     verified=[]
     for member in members:
-        value,_=call(member['endpoint'],'/v1/hello',key,{'peer':next(p for p in members if p['endpoint']==args.endpoint) if any(p['endpoint']==args.endpoint for p in members) else members[0]})
+        value,_=call(member['endpoint'],'/v1/hello',key,{'peer':proposing_peer})
         if value['peer']['id']!=member['id']:raise ValueError('Peer endpoint identity changed')
         verified.append(value['peer'])
     members=sorted(verified,key=lambda p:p['id'])
