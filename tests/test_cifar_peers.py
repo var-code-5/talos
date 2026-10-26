@@ -60,6 +60,7 @@ class PeerTests(unittest.TestCase):
                 artifact=start(args);result=json.loads(Path(artifact).read_text())
                 self.assertTrue(result['peer_models_identical']);self.assertEqual(result['topology'],'single-host-peers')
                 self.assertIn('initial_weights',result['config'])
+                self.assertEqual(result['config']['numerics'],'fp64-portable')
                 self.assertEqual(len({p['initial_weight_digest'] for p in result['peers']}),1)
                 for peer in result['peers']:
                     self.assertEqual(peer['totals']['samples'],128)
@@ -68,6 +69,7 @@ class PeerTests(unittest.TestCase):
                     self.assertGreater(peer['totals']['network_response_body_bytes'],0)
                     self.assertGreater(peer['totals']['audit_seconds'],0)
                     self.assertEqual(peer['final_evaluation']['test_count'],64)
+                    self.assertTrue(peer['last_audit']['passed'])
                 # Proposal retries are idempotent and do not repeat training.
                 again,_=call(endpoints[0],'/v1/runs',key,result['config'])
                 self.assertEqual(again['status'],'completed')
@@ -87,6 +89,9 @@ class PeerTests(unittest.TestCase):
                 bad=json.loads(Path(artifact).read_text());bad['config']['members'][0]['torch_version']='0.0.0'
                 bad_path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-framework'))
+                bad=json.loads(Path(artifact).read_text());bad['config']['numerics']='fp32-native'
+                bad_path.write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-numerics'))
                 status=public(endpoints[0],'/v1/status')
                 self.assertEqual(status['runs'][0]['rounds'],4)
                 with urllib.request.urlopen(endpoints[0]) as response:

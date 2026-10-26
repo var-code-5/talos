@@ -23,7 +23,8 @@ from mtcp.host import available_cpus, pin_cpus
 from .data import load_manifest
 from .metrics import distribution,write_json,export_rounds
 from .network import Discovery,call,discover_host
-from .training import ARTIFACT,PARAMETERS,model,weights,decode,encode,train,evaluate
+from .training import ARTIFACT,PARAMETERS,NUMERICS,model,weights,decode,encode,train,evaluate
+from .audit import compare_update
 
 
 class Peer:
@@ -62,7 +63,7 @@ class Peer:
                     resources=self.capacity,threads=self.threads,backend=self.backend,
                     dataset_id=self.manifest['dataset_id'],artifact_digest=ARTIFACT,
                     torch_version=torch.__version__,numpy_version=np.__version__,python_version=platform.python_version(),
-                    measured_links=links)
+                    measured_links=links,numerics_supported=list(NUMERICS))
 
     def remember(self,peer):
         if peer['id']==self.id:return
@@ -83,6 +84,7 @@ class Peer:
         if config['dataset_id']!=self.manifest['dataset_id'] or config['artifact_digest']!=ARTIFACT:
             raise ValueError('Dataset or training artifact mismatch')
         if config['threads']!=self.threads:raise ValueError('Thread allocation differs from experiment')
+        if config.get('numerics','fp32-native') not in NUMERICS:raise ValueError('Unsupported numerical profile')
         if any(p['backend']!=self.backend or p['torch_version'].split('+')[0]!=torch.__version__.split('+')[0] or p['numpy_version']!=np.__version__ for p in members):
             raise ValueError('All peers must use identical backend and PyTorch/NumPy versions')
         mine=next(p for p in members if p['id']==self.id)
@@ -127,10 +129,13 @@ class Peer:
     def execute(self,run_id):
         run=self.runs[run_id];config=run['config'];members=config['members'];index=[p['id'] for p in members].index(self.id)
         root=self.directory/'runs'/run_id;root.mkdir(parents=True,exist_ok=True)
+        (root/'commits').mkdir(exist_ok=True)
+        (root/'audits').mkdir(exist_ok=True)
         write_json(root/'config.json',config)
         totals=dict(network_request_body_bytes=0,network_response_body_bytes=0,audit_seconds=0.,
                     train_seconds=0.,evaluation_seconds=0.,barrier_seconds=0.,cpu_seconds=0.,samples=0)
         rtts=[];network=[];audit_momenta={};momentum=None
+        numerics=config.get('numerics','fp32-native')
         try:
             for member in members:
                 if member['id']!=self.id:
@@ -145,7 +150,7 @@ class Peer:
             started=time.perf_counter()
             per_round=max(1,config['sync_samples']//len(members));round_id=0
             shard_sizes=[len(range(i,config['train_limit'],len(members))) for i in range(len(members))]
-            initial_eval=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'])
+            initial_eval=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'],numerics)
             with self.lock:run['initial_evaluation']=initial_eval
             totals['evaluation_seconds']+=initial_eval['evaluation_seconds']
             for epoch in range(config['epochs']):
@@ -162,14 +167,15 @@ class Peer:
                     payload=dict(dataset_id=config['dataset_id'],seed=config['seed'],threads=self.threads,
                         train_limit=config['train_limit'],peers=len(members),peer=index,epoch=epoch,start=start,count=count,
                         batch_size=config['batch_size'],lr=config['lr'],momentum=config['momentum'],weights=current,
-                        optimizer_momentum=momentum)
+                        optimizer_momentum=momentum,numerics=numerics)
                     local_started=time.perf_counter()
                     result=self.local_train(payload) if count else dict(weights=current,optimizer_momentum=momentum,
-                        count=0,train_loss=0.,train_accuracy=0.,train_seconds=0.,wall_seconds=0.,cpu_seconds=0.,peak_rss_mb=0.)
+                        count=0,train_loss=0.,train_accuracy=0.,train_seconds=0.,wall_seconds=0.,cpu_seconds=0.,peak_rss_mb=0.,numerics=numerics)
                     local_seconds=time.perf_counter()-local_started
                     commit=dict(run_id=run_id,round=round_id,peer_id=self.id,epoch=epoch,start=start,
                         input_digest=digest({'weights':current,'epoch':epoch,'start':start}),artifact_digest=ARTIFACT,
-                        dataset_id=config['dataset_id'],result=result)
+                        dataset_id=config['dataset_id'],numerics=numerics,result=result)
+                    write_json(root/'commits'/f'round-{round_id}.json',commit)
                     with self.lock:run['commits'][str(round_id)]=commit
                     contributions=[None]*len(members);contributions[index]=commit
                     waited=time.perf_counter()
@@ -178,24 +184,32 @@ class Peer:
                         value,metric=self.wait_for(member,f'/v1/runs/{run_id}/rounds/{round_id}',time.monotonic()+180,
                                                   lambda value:value.get('ready',False))
                         contribution=value['commit'];expected=min(per_round,max(0,shard_sizes[other]-start))
-                        if any(contribution.get(k)!=commit[k] for k in ('run_id','round','epoch','start','input_digest','artifact_digest','dataset_id')) or contribution['peer_id']!=member['id']:
+                        if any(contribution.get(k)!=commit[k] for k in ('run_id','round','epoch','start','input_digest','artifact_digest','dataset_id','numerics')) or contribution['peer_id']!=member['id']:
                             raise ValueError('Stale or incorrectly bound peer update')
                         received=contribution['result'];decode(received['weights'])
+                        if received.get('numerics','fp32-native')!=numerics:raise ValueError('Peer used a different numerical profile')
                         if received['count']!=expected:raise ValueError('Incorrect contribution sample count')
                         decode(received['optimizer_momentum']) if expected else None
                         contributions[other]=contribution
                         round_request+=metric['request_body_bytes'];round_response+=metric['response_body_bytes'];round_network_seconds+=metric['seconds']
                     barrier_seconds=time.perf_counter()-waited
                     audit_started=time.perf_counter()
+                    audit_evidence=[]
                     if config['audit']=='full':
                         for other,contribution in enumerate(contributions):
                             if other==index or not contribution['result']['count']:continue
                             audit_payload=dict(payload,peer=other,count=contribution['result']['count'],optimizer_momentum=audit_momenta.get(other))
                             reference=self.local_train(audit_payload)
-                            if not np.allclose(decode(reference['weights']),decode(contribution['result']['weights']),atol=1e-6,rtol=1e-5):
-                                raise ValueError('Independent local-SGD audit failed')
-                            if not np.allclose(decode(reference['optimizer_momentum']),decode(contribution['result']['optimizer_momentum']),atol=1e-6,rtol=1e-5):
-                                raise ValueError('Independent optimizer-state audit failed')
+                            evidence=dict(compare_update(reference,contribution['result']),round=round_id,
+                                peer_id=members[other]['id'],numerics=numerics)
+                            write_json(root/'audits'/f'round-{round_id}-member-{other}.json',evidence)
+                            with self.lock:run['last_audit']=evidence
+                            audit_evidence.append(evidence)
+                            if not evidence['passed']:
+                                raise ValueError(f"Independent local-SGD audit failed ({numerics}): "
+                                    f"weights max_abs={evidence['weights']['max_abs']:.6g}; "
+                                    f"momentum max_abs={evidence['optimizer_momentum']['max_abs']:.6g}. "
+                                    'Detailed evidence saved under the run audits directory.')
                     audit_seconds=time.perf_counter()-audit_started if config['audit']=='full' else 0.
                     total=sum(c['result']['count'] for c in contributions)
                     # Fixed participant ordering gives every peer the same independent aggregation.
@@ -204,14 +218,16 @@ class Peer:
                         update=contribution['result'];accumulated+=decode(update['weights']).astype(np.float64)*update['count']/total
                         audit_momenta[other]=update['optimizer_momentum']
                     current=encode(accumulated);momentum=result['optimizer_momentum']
-                    evaluation=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'])
+                    evaluation=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'],numerics)
                     round_wall=time.perf_counter()-round_started
-                    record=dict(round=round_id,epoch=epoch+1,local_samples=count,global_samples=total,
+                    record=dict(round=round_id,epoch=epoch+1,numerics=numerics,local_samples=count,global_samples=total,
                         train_loss=sum(c['result']['train_loss']*c['result']['count'] for c in contributions)/total,
                         train_accuracy=sum(c['result']['train_accuracy']*c['result']['count'] for c in contributions)/total,
                         test_accuracy=evaluation['test_accuracy'],test_loss=evaluation['test_loss'],macro_f1=evaluation['macro_f1'],
                         local_compute_seconds=local_seconds,kernel_train_seconds=result['train_seconds'],
                         audit_seconds=audit_seconds,evaluation_seconds=evaluation['evaluation_seconds'],
+                        audit_max_weight_error=max((e['weights']['max_abs'] for e in audit_evidence),default=None),
+                        audit_max_momentum_error=max((e['optimizer_momentum']['max_abs'] for e in audit_evidence),default=None),
                         barrier_seconds=barrier_seconds,network_seconds=round_network_seconds,
                         rtt_mean_ms=sum(peer_rtts)/len(peer_rtts) if peer_rtts else 0.,
                         request_body_bytes=round_request,response_body_bytes=round_response,
@@ -249,6 +265,7 @@ def validate_config(config):
         value=config.get(key)
         if type(value) not in (int,float) or not math.isfinite(value) or not low<=value<high or (key=='lr' and value==0):raise ValueError(f'Invalid {key}')
     if config.get('audit') not in ('full','none'):raise ValueError('Unknown audit policy')
+    if config.get('numerics','fp32-native') not in NUMERICS:raise ValueError('Unknown numerical profile')
     if config.get('initial_weights') is not None:decode(config['initial_weights'])
     members=config.get('members',[])
     if not 1<=len(members)<=8 or len({p['id'] for p in members})!=len(members):raise ValueError('Invalid membership')
@@ -287,7 +304,7 @@ def handler_for(peer):
                             rounds=len(run['rounds']),latest=run['rounds'][-1] if run['rounds'] else None,
                             epochs=run['config']['epochs'],train_limit=run['config']['train_limit'],
                             peers=len(run['config']['members']),audit=run['config']['audit'],
-                            backend=run['peer']['backend']))
+                            numerics=run['config'].get('numerics','fp32-native'),backend=run['peer']['backend']))
                 self.send({'self':peer.description(),'peers':peer.members(),'runs':summaries},authenticated=False);return
             if self.path=='/health':self.send({'status':'ok'},authenticated=False);return
             if self.path=='/v1/resources':self.send(peer.description(),authenticated=False);return
@@ -297,8 +314,11 @@ def handler_for(peer):
             try:
                 if len(parts)==3 and parts[:2]==['v1','runs']:self.send(peer.public(parts[2]));return
                 if len(parts)==5 and parts[:2]==['v1','runs'] and parts[3]=='rounds':
+                    if not parts[4].isdigit():self.send({'error':'Invalid round'},400);return
                     with peer.lock:
                         run=peer.runs[parts[2]];commit=run['commits'].get(parts[4])
+                        saved=peer.directory/'runs'/parts[2]/'commits'/f'round-{int(parts[4])}.json'
+                        if commit is None and saved.exists():commit=json.loads(saved.read_text())
                         response={'ready':commit is not None,'commit':commit,'status':run['status'],'error':run.get('error')}
                     self.send(response);return
                 self.send({'error':'Not found'},404)

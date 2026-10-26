@@ -6,11 +6,12 @@ from pathlib import Path
 import statistics
 from .metrics import distribution
 
-CONFIG_FIELDS=('epochs','train_limit','test_limit','batch_size','sync_samples','threads','lr','momentum','audit','dataset_id','artifact_digest')
+CONFIG_FIELDS=('epochs','train_limit','test_limit','batch_size','sync_samples','threads','lr','momentum','audit','numerics','dataset_id','artifact_digest')
 
 
 def compare(paths,destination):
     runs=[json.loads(Path(p).read_text()) for p in paths]
+    for run in runs:run['config'].setdefault('numerics','fp32-native')
     if not runs:raise ValueError('Supply at least one completed experiment')
     reference=runs[0]['config'];peers=len(reference['members'])
     initial_digest=runs[0]['peers'][0]['initial_weight_digest']
@@ -41,7 +42,7 @@ def compare(paths,destination):
             rtt_values=[r['rtt_mean_ms'] for p in nodes for r in p['rounds']]
         pooled_rtt=distribution(rtt_values)
         # Directed HTTP exchanges are counted at the initiating peer, so this sum does not double-count them.
-        rows.append(dict(run_id=run['config']['run_id'],topology=run['topology'],seed=run['config']['seed'],
+        rows.append(dict(run_id=run['config']['run_id'],topology=run['topology'],seed=run['config']['seed'],numerics=run['config']['numerics'],
             accuracy_percent=100*run['test_accuracy'],test_loss=run['test_loss'],macro_f1=nodes[0]['final_evaluation']['macro_f1'],
             wall_seconds=run['wall_seconds'],global_samples_per_second=reference['train_limit']*reference['epochs']/run['wall_seconds'],
             rtt_mean_ms=statistics.mean(p['rtt_ms']['mean'] for p in nodes if p['rtt_ms']['mean'] is not None) if len(nodes)>1 else 0,

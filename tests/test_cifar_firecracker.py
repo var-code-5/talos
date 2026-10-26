@@ -31,3 +31,10 @@ class CifarGuestTests(unittest.TestCase):
         next_host=train(payload,data)
         next_guest=runner.execute(payload,operation='cifar-train',timeout=90,memory_mb=768)
         self.assertTrue(np.allclose(decode(next_host['weights']),decode(next_guest['weights']),atol=1e-6,rtol=1e-5))
+        payload['numerics']='fp64-portable'
+        portable_host=train(payload,data)
+        portable_guest=runner.execute(payload,operation='cifar-train',timeout=90,memory_mb=768)
+        self.assertEqual(portable_guest['compute_dtype'],'torch.float64')
+        self.assertFalse(portable_guest['mkldnn_enabled'])
+        self.assertTrue(np.allclose(decode(portable_host['weights']),decode(portable_guest['weights']),atol=1e-6,rtol=1e-5))
+        self.assertTrue(np.allclose(decode(portable_host['optimizer_momentum']),decode(portable_guest['optimizer_momentum']),atol=1e-6,rtol=1e-5))

@@ -36,6 +36,10 @@ def start(args):
         verified.append(value['peer'])
     members=sorted(verified,key=lambda p:p['id'])
     first=members[0]
+    numerics=getattr(args,'numerics','fp64-portable')
+    for member in members:
+        if numerics not in member.get('numerics_supported',['fp32-native']):
+            raise ValueError(f"Peer {member['name']} needs a code update and restart to support {numerics}")
     if any(p['threads']!=args.threads for p in members):
         raise ValueError('Every peer must advertise the requested PyTorch thread allocation')
     if any(p['dataset_id']!=first['dataset_id'] or p['artifact_digest']!=first['artifact_digest'] for p in members):
@@ -50,7 +54,7 @@ def start(args):
     config=dict(run_id=secrets.token_hex(12),members=members,epochs=args.epochs,train_limit=args.train_limit,
         test_limit=args.test_limit,batch_size=args.batch_size,sync_samples=args.sync_samples,
         threads=args.threads,seed=args.seed,lr=args.lr,momentum=args.momentum,audit=args.audit,
-        dataset_id=first['dataset_id'],artifact_digest=first['artifact_digest'],initial_weights=initial)
+        dataset_id=first['dataset_id'],artifact_digest=first['artifact_digest'],initial_weights=initial,numerics=numerics)
     for member in members:call(member['endpoint'],'/v1/runs',key,config)
     print(f"Started {config['run_id']} on {len(members)} equal peers; no peer is a permanent coordinator",flush=True)
     if args.no_wait:return config['run_id']
@@ -68,7 +72,8 @@ def collect(config,key,output):
             print(' | '.join(f"{s['peer']['name']}: {s['status']}, {len(s['rounds'])} rounds" for s in states),flush=True);previous=progress
         if any(s['status']=='failed' for s in states):
             write_json(Path(output)/run_id/'experiment.json',{'config':config,'peers':states,'status':'failed'})
-            raise RuntimeError(str([s.get('error') for s in states if s['status']=='failed']))
+            errors='; '.join(f"{s['peer']['name']}: {s.get('error')}" for s in states if s['status']=='failed')
+            raise RuntimeError(f"Run {run_id} failed. {errors} Full peer diagnostics saved in {Path(output)/run_id/'experiment.json'}")
         if all(s['status']=='completed' and s.get('accepting_runs',True) for s in states):break
         time.sleep(1)
     else:raise TimeoutError('Experiment collection timed out; peers continue independently')

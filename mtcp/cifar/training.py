@@ -14,15 +14,21 @@ from mtcp.host import peak_rss_mb
 
 PARAMETERS = 22058
 ARTIFACT = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+NUMERICS = ('fp32-native', 'fp64-portable')
 
 
-def model(seed=42, threads=1):
+def model(seed=42, threads=1, numerics='fp32-native'):
+    if numerics not in NUMERICS:
+        raise ValueError('Unknown numerical profile')
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(1) if torch.get_num_interop_threads() != 1 else None
     torch.use_deterministic_algorithms(True)
+    torch.backends.mkldnn.enabled = numerics == 'fp32-native'
+    torch.set_float32_matmul_precision('highest')
     torch.manual_seed(seed)
-    return nn.Sequential(nn.Conv2d(3,16,5),nn.MaxPool2d(2,2),nn.ReLU(),
+    net = nn.Sequential(nn.Conv2d(3,16,5),nn.MaxPool2d(2,2),nn.ReLU(),
         nn.Conv2d(16,32,5),nn.MaxPool2d(2,2),nn.ReLU(),nn.Flatten(),nn.Linear(32*5*5,10))
+    return net.double() if numerics == 'fp64-portable' else net
 
 
 def encode(values):
@@ -70,8 +76,8 @@ def indices(seed, train_limit, peers, peer, epoch, start, count):
     return order[start:start+count]
 
 
-def batch(images, labels, selected):
-    x = torch.from_numpy(np.array(images[selected],copy=True)).to(torch.float32).div_(255).sub_(.5).div_(.5)
+def batch(images, labels, selected, dtype=torch.float32):
+    x = torch.from_numpy(np.array(images[selected],copy=True)).to(dtype).div_(255).sub_(.5).div_(.5)
     y = torch.from_numpy(np.array(labels[selected],dtype=np.int64,copy=True))
     return x,y
 
@@ -83,13 +89,15 @@ def train(payload, directory):
         raise ValueError('CIFAR dataset identity mismatch')
     if not 1 <= payload['batch_size'] <= 512 or not 0 < payload['lr'] <= 1 or not 0 <= payload['momentum'] < 1:
         raise ValueError('Invalid optimizer configuration')
-    net = model(payload['seed'],payload.get('threads',1)); set_weights(net,payload['weights'])
+    numerics = payload.get('numerics', 'fp32-native')
+    net = model(payload['seed'],payload.get('threads',1),numerics); set_weights(net,payload['weights'])
+    dtype = next(net.parameters()).dtype
     optimizer = torch.optim.SGD(net.parameters(),lr=payload['lr'],momentum=payload['momentum'])
     if payload.get('optimizer_momentum'):
         flat = decode(payload['optimizer_momentum']); offset=0
         for p in net.parameters():
             count=p.numel()
-            optimizer.state[p]['momentum_buffer']=torch.from_numpy(flat[offset:offset+count].reshape(p.shape).copy())
+            optimizer.state[p]['momentum_buffer']=torch.from_numpy(flat[offset:offset+count].reshape(p.shape).copy()).to(p.dtype)
             offset+=count
     selected = indices(payload['seed'],payload['train_limit'],payload['peers'],payload['peer'],
                        payload['epoch'],payload['start'],payload['count'])
@@ -97,7 +105,7 @@ def train(payload, directory):
     loaded=time.perf_counter(); total_loss=0.; correct=0
     net.train()
     for offset in range(0,len(selected),payload['batch_size']):
-        x,y=batch(images,labels,selected[offset:offset+payload['batch_size']])
+        x,y=batch(images,labels,selected[offset:offset+payload['batch_size']],dtype)
         optimizer.zero_grad(set_to_none=True)
         out=net(x); value=F.cross_entropy(out,y)
         value.backward(); optimizer.step()
@@ -109,11 +117,14 @@ def train(payload, directory):
         train_loss=total_loss/len(selected),train_accuracy=correct/len(selected),
         prepare_seconds=loaded-before,train_seconds=trained-loaded,wall_seconds=trained-before,
         cpu_seconds=time.process_time()-cpu_before,peak_rss_mb=peak_rss_mb(),
-        torch_version=torch.__version__,threads=payload.get('threads',1))
+        torch_version=torch.__version__,threads=payload.get('threads',1),numerics=numerics,
+        compute_dtype=str(dtype),mkldnn_enabled=torch.backends.mkldnn.enabled,
+        cpu_capability=torch.backends.cpu.get_cpu_capability())
 
 
-def evaluate(encoded,directory,seed=42,threads=1,test_limit=10000):
-    started=time.perf_counter(); net=model(seed,threads);set_weights(net,encoded);net.eval()
+def evaluate(encoded,directory,seed=42,threads=1,test_limit=10000,numerics='fp32-native'):
+    started=time.perf_counter(); net=model(seed,threads,numerics);set_weights(net,encoded);net.eval()
+    dtype=next(net.parameters()).dtype
     images,labels=arrays(directory,'test')
     if not 1 <= test_limit <= 10000:
         raise ValueError('Invalid test-set size')
@@ -121,7 +132,7 @@ def evaluate(encoded,directory,seed=42,threads=1,test_limit=10000):
     confusion=np.zeros((10,10),dtype=np.int64);total_loss=0.;top5=0
     with torch.no_grad():
         for start in range(0,len(chosen),256):
-            x,y=batch(images,labels,chosen[start:start+256]);out=net(x)
+            x,y=batch(images,labels,chosen[start:start+256],dtype);out=net(x)
             total_loss+=float(F.cross_entropy(out,y,reduction='sum'))
             pred=out.argmax(1).numpy();truth=y.numpy()
             np.add.at(confusion,(truth,pred),1)

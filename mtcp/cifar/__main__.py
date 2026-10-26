@@ -27,6 +27,7 @@ def main():
     run.add_argument('--seed',type=int,default=42);run.add_argument('--lr',type=float,default=.001)
     run.add_argument('--initial-checkpoint',help='Use the exact initial.json artifact from the control run for a cross-platform comparison')
     run.add_argument('--momentum',type=float,default=.9);run.add_argument('--audit',choices=['full','none'],default='full')
+    run.add_argument('--numerics',choices=['fp32-native','fp64-portable'],default='fp64-portable',help='Portable FP64 computation is the default for independently audited heterogeneous peers')
     run.add_argument('--discovery-wait',type=float,default=60);run.add_argument('--no-wait',action='store_true')
     run.add_argument('--output',default='results/cifar')
     report=commands.add_parser('compare',help='Compare compatible experiment artifacts')
@@ -68,4 +69,7 @@ def main():
         collect(value['config'],key,args.output)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except (ValueError,RuntimeError,OSError) as exc:
+        raise SystemExit(str(exc))
