@@ -31,7 +31,8 @@ class PeerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             key=secrets.token_hex(32);env=dict(os.environ,MTCP_CLUSTER_KEY=key)
             discovery=port(socket.SOCK_DGRAM);processes=[];logs=[];endpoints=[]
-            cpus=sorted(os.sched_getaffinity(0))
+            from mtcp.host import available_cpus
+            cpus=available_cpus()
             old_key=os.environ.get('MTCP_CLUSTER_KEY');os.environ['MTCP_CLUSTER_KEY']=key
             try:
                 for i in range(2):

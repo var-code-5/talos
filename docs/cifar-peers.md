@@ -146,3 +146,45 @@ participants but does not encrypt traffic or distinguish malicious key holders.
 Use encrypted routing/TLS termination for an untrusted network. Benchmark peers
 currently run fixed trusted code in their own processes; Firecracker support is
 an additional backend, with its availability and configuration recorded explicitly.
+
+## Windows and macOS
+
+The **process backend is portable**; it does not require Linux or KVM. The pinned
+stack targets Windows x86-64 and Apple Silicon macOS 14+ (the published PyTorch
+2.13 wheel is ARM64). Intel Macs are not supported by this pinned PyTorch release.
+Native Windows/macOS validation is pending; the repository includes a three-OS CI
+matrix, and local tests cover the platform-specific metric/affinity branches.
+
+Windows PowerShell, using Python 3.13:
+
+```powershell
+py -3.13 -m venv .venv-cifar
+.\.venv-cifar\Scripts\python.exe -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+.\.venv-cifar\Scripts\python.exe -m pip install numpy==2.5.2 psutil==7.2.2
+.\.venv-cifar\Scripts\python.exe -m mtcp.cifar prepare --download
+$env:MTCP_CLUSTER_KEY = '<same-generated-key>'
+.\.venv-cifar\Scripts\python.exe -m mtcp peer --name friend-windows --port 9101 --backend process
+```
+
+Apple Silicon macOS, using Python 3.13:
+
+```sh
+python3.13 -m venv .venv-cifar
+.venv-cifar/bin/python -m pip install torch==2.13.0 numpy==2.5.2 psutil==7.2.2
+.venv-cifar/bin/python -m mtcp.cifar prepare --download
+export MTCP_CLUSTER_KEY='<same-generated-key>'
+.venv-cifar/bin/python -m mtcp peer --name friend-mac --port 9101 --backend process
+```
+
+Allow the Python application's incoming connections in the OS firewall if
+prompted. If multicast discovery does not cross the network, append
+`--connect http://OTHER_LAPTOP_IP:9101`. CPU training is used on every platform;
+CUDA and Apple MPS are not enabled. macOS does not expose the same hard CPU
+pinning API, so the app records `affinity_enforced=false` while still limiting
+PyTorch threads. Such runs compare placement **and platform/hardware**, rather
+than isolating networking alone. CPU build suffixes may differ across platforms;
+peers require the same PyTorch base version and NumPy version.
+
+The **Firecracker backend requires Linux/KVM** and is rejected explicitly on
+Windows/macOS. See the [Firecracker prerequisites](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md)
+and [PyTorch platform installation documentation](https://pytorch.org/get-started/locally/).

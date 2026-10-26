@@ -6,20 +6,20 @@ from pathlib import Path
 import platform
 import time
 from .kernel import gradient, samples
+from .host import available_cpus, memory_mb as host_memory_mb, identity as host_identity
 
 
 def advertise(cpus=None, memory_mb=128, upload_mbps=100, download_mbps=100, backend='bounded-process'):
-    cpus = cpus or sorted(os.sched_getaffinity(0))[:1]
-    meminfo = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+    cpus = cpus or available_cpus()[:1]
+    total_memory, available_memory = host_memory_mb()
     data = samples()
     before = time.perf_counter()
     for _ in range(20):
         gradient([0., 0., 0.], data)
     throughput = 20000 / (time.perf_counter() - before)
-    machine = Path('/etc/machine-id').read_text().strip() if Path('/etc/machine-id').exists() else platform.node()
-    return dict(host_id=hashlib.sha256(machine.encode()).hexdigest()[:12], architecture=platform.machine(),
-        logical_cpus=os.cpu_count(), host_memory_mb=int(meminfo['MemTotal'].split()[0]) // 1024,
-        host_available_memory_mb=int(meminfo['MemAvailable'].split()[0]) // 1024,
+    return dict(host_id=host_identity(), architecture=platform.machine(),
+        logical_cpus=os.cpu_count(), host_memory_mb=total_memory,
+        host_available_memory_mb=available_memory,
         offered_vcpus=len(cpus), cpu_affinity=cpus, offered_memory_mb=memory_mb,
         offered_upload_mbps=upload_mbps, offered_download_mbps=download_mbps,
         bandwidth_source='owner-configured application pacing budget',

@@ -19,6 +19,7 @@ import torch
 from mtcp.kernel import canonical,digest
 from mtcp.protocol import sign
 from mtcp.resources import advertise
+from mtcp.host import available_cpus, pin_cpus
 from .data import load_manifest
 from .metrics import distribution,write_json,export_rounds
 from .network import Discovery,call,discover_host
@@ -26,7 +27,7 @@ from .training import ARTIFACT,PARAMETERS,model,weights,decode,encode,train,eval
 
 
 class Peer:
-    def __init__(self,directory,data,key,name,cpus,threads=1,backend='process',assets=None,memory_mb=768):
+    def __init__(self,directory,data,key,name,cpus,threads=1,backend='process',assets=None,memory_mb=768,affinity_enforced=False):
         self.directory=Path(directory);self.directory.mkdir(parents=True,exist_ok=True)
         identity_path=self.directory/'identity.json'
         if not identity_path.exists():write_json(identity_path,{'id':uuid.uuid4().hex})
@@ -36,11 +37,18 @@ class Peer:
         self.lock=threading.RLock();self.peers={};self.runs={};self.active=None;self.links={}
         self.capacity=advertise(cpus,memory_mb,100,100,'kvm-microvm' if backend=='firecracker' else 'trusted-cifar-process')
         self.capacity.update(offered_upload_mbps=None,offered_download_mbps=None,
-            bandwidth_source='Uncapped; measured peer links are advertised separately')
+            bandwidth_source='Uncapped; measured peer links are advertised separately',
+            affinity_enforced=affinity_enforced,os=platform.system(),architecture=platform.machine(),
+            cpu_description=platform.processor() or platform.machine())
         self.runner=None
         if backend=='firecracker':
+            if platform.system()!='Linux':
+                raise ValueError('Firecracker requires Linux/KVM. Use --backend process on Windows/macOS.')
             from mtcp.firecracker import Firecracker
             self.runner=Firecracker(assets or '.mtcp/firecracker-cifar',cpus,memory_mb)
+            guest_manifest=json.loads((self.runner.assets/'manifest.json').read_text())
+            if guest_manifest.get('cifar_artifact_digest')!=ARTIFACT or guest_manifest.get('dataset_id')!=self.manifest['dataset_id']:
+                raise ValueError('Firecracker image lacks the matching CIFAR kernel/dataset; prepare the CIFAR image first')
             self.runner.execute(operation='probe')
         self.endpoint=None
 
@@ -70,7 +78,7 @@ class Peer:
         if config['dataset_id']!=self.manifest['dataset_id'] or config['artifact_digest']!=ARTIFACT:
             raise ValueError('Dataset or training artifact mismatch')
         if config['threads']!=self.threads:raise ValueError('Thread allocation differs from experiment')
-        if any(p['backend']!=self.backend or p['torch_version']!=torch.__version__ or p['numpy_version']!=np.__version__ for p in members):
+        if any(p['backend']!=self.backend or p['torch_version'].split('+')[0]!=torch.__version__.split('+')[0] or p['numpy_version']!=np.__version__ for p in members):
             raise ValueError('All peers must use identical backend and PyTorch/NumPy versions')
         mine=next(p for p in members if p['id']==self.id)
         if mine['endpoint']!=self.endpoint or mine['host_id']!=self.capacity['host_id']:
@@ -284,10 +292,11 @@ def handler_for(peer):
 def serve(args):
     key=os.environ.get('MTCP_CLUSTER_KEY','')
     if len(key)<32:raise ValueError('Set MTCP_CLUSTER_KEY to the same random key (at least 32 characters) on all intended peers')
-    cpus=[int(c) for c in args.cpus.split(',')] if args.cpus else sorted(os.sched_getaffinity(0))[:args.threads]
-    if len(cpus)<args.threads or not set(cpus)<=set(os.sched_getaffinity(0)):raise ValueError('Invalid CPU allocation')
-    os.sched_setaffinity(0,cpus)
-    peer=Peer(args.state_dir or f'.mtcp/cifar-peer-{args.port}',args.data,key,args.name,cpus,args.threads,args.backend,args.assets,args.memory_mb)
+    if not 1<=args.threads<=32:raise ValueError('Threads must be between 1 and 32')
+    cpus=[int(c) for c in args.cpus.split(',')] if args.cpus else available_cpus()[:args.threads]
+    if len(set(cpus))!=len(cpus) or len(cpus)<args.threads or not set(cpus)<=set(available_cpus()):raise ValueError('Invalid CPU allocation')
+    affinity_enforced=pin_cpus(cpus)
+    peer=Peer(args.state_dir or f'.mtcp/cifar-peer-{args.port}',args.data,key,args.name,cpus,args.threads,args.backend,args.assets,args.memory_mb,affinity_enforced)
     server=ThreadingHTTPServer((args.host,args.port),handler_for(peer));peer.endpoint=f'http://{args.advertise_host or discover_host()}:{server.server_port}'
     def explicit_hello():
         while not peer.stop.is_set():

@@ -118,6 +118,9 @@ def handler_for(coordinator):
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=="peer":
+        from .cifar.__main__ import main as cifar_main
+        return cifar_main()
     parser = argparse.ArgumentParser(description="MTCP fixed-workload research prototype")
     parser.add_argument("command", nargs="?", choices=["serve", "worker"], default="serve")
     parser.add_argument("--demo", action="store_true", help="Launch two separate volunteer processes")

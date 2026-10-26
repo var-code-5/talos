@@ -7,7 +7,9 @@ def main():
     parser=argparse.ArgumentParser(description='Equal-peer MTCP CIFAR-10 experiments')
     commands=parser.add_subparsers(dest='command',required=True)
     prepare=commands.add_parser('prepare',help='Convert checksum-verified CIFAR to safe arrays')
-    prepare.add_argument('--archive',required=True);prepare.add_argument('--output',default='.mtcp/cifar10')
+    source=prepare.add_mutually_exclusive_group(required=True)
+    source.add_argument('--archive');source.add_argument('--download',action='store_true')
+    prepare.add_argument('--output',default='.mtcp/cifar10')
     peer=commands.add_parser('peer',help='Advertise, discover, and train as an equal peer')
     peer.add_argument('--data',default='.mtcp/cifar10');peer.add_argument('--host',default='0.0.0.0')
     peer.add_argument('--port',type=int,default=9101);peer.add_argument('--advertise-host')
@@ -31,6 +33,17 @@ def main():
     args=parser.parse_args()
     if args.command=='prepare':
         from .data import prepare as convert
+        if args.download:
+            from pathlib import Path
+            import urllib.request
+            archive=Path('.mtcp/downloads/cifar-10-python.tar.gz')
+            archive.parent.mkdir(parents=True,exist_ok=True)
+            if not archive.exists():
+                temporary=archive.with_suffix('.part')
+                print('Downloading the official CIFAR-10 archive; checksum verification follows',flush=True)
+                urllib.request.urlretrieve('https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz',temporary)
+                temporary.replace(archive)
+            args.archive=str(archive)
         print(json.dumps(convert(args.archive,args.output),indent=2))
     elif args.command=='peer':
         from .peer import serve

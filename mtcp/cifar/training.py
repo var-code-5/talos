@@ -3,7 +3,6 @@ import base64
 import hashlib
 import math
 from pathlib import Path
-import resource
 import time
 
 import numpy as np
@@ -11,6 +10,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from .data import arrays, load_manifest
+from mtcp.host import peak_rss_mb
 
 PARAMETERS = 22058
 ARTIFACT = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -108,7 +108,7 @@ def train(payload, directory):
     return dict(weights=weights(net),optimizer_momentum=encode(buffers),count=len(selected),
         train_loss=total_loss/len(selected),train_accuracy=correct/len(selected),
         prepare_seconds=loaded-before,train_seconds=trained-loaded,wall_seconds=trained-before,
-        cpu_seconds=time.process_time()-cpu_before,peak_rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
+        cpu_seconds=time.process_time()-cpu_before,peak_rss_mb=peak_rss_mb(),
         torch_version=torch.__version__,threads=payload.get('threads',1))
 
 
