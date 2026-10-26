@@ -1,0 +1,323 @@
+"""Symmetric CIFAR peers: each trains, publishes a commit, audits, and aggregates."""
+import copy
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import secrets
+import signal
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+import numpy as np
+import torch
+from mtcp.kernel import canonical,digest
+from mtcp.protocol import sign
+from mtcp.resources import advertise
+from .data import load_manifest
+from .metrics import distribution,write_json,export_rounds
+from .network import Discovery,call,discover_host
+from .training import ARTIFACT,PARAMETERS,model,weights,decode,encode,train,evaluate
+
+
+class Peer:
+    def __init__(self,directory,data,key,name,cpus,threads=1,backend='process',assets=None,memory_mb=768):
+        self.directory=Path(directory);self.directory.mkdir(parents=True,exist_ok=True)
+        identity_path=self.directory/'identity.json'
+        if not identity_path.exists():write_json(identity_path,{'id':uuid.uuid4().hex})
+        self.id=json.loads(identity_path.read_text())['id'];self.name=name
+        self.data=str(Path(data).resolve());self.manifest=load_manifest(self.data,verify=True)
+        self.key=key;self.threads=threads;self.backend=backend;self.stop=threading.Event()
+        self.lock=threading.RLock();self.peers={};self.runs={};self.active=None;self.links={}
+        self.capacity=advertise(cpus,memory_mb,100,100,'kvm-microvm' if backend=='firecracker' else 'trusted-cifar-process')
+        self.capacity.update(offered_upload_mbps=None,offered_download_mbps=None,
+            bandwidth_source='Uncapped; measured peer links are advertised separately')
+        self.runner=None
+        if backend=='firecracker':
+            from mtcp.firecracker import Firecracker
+            self.runner=Firecracker(assets or '.mtcp/firecracker-cifar',cpus,memory_mb)
+            self.runner.execute(operation='probe')
+        self.endpoint=None
+
+    def description(self):
+        return dict(id=self.id,name=self.name,endpoint=self.endpoint,host_id=self.capacity['host_id'],
+                    resources=self.capacity,threads=self.threads,backend=self.backend,
+                    dataset_id=self.manifest['dataset_id'],artifact_digest=ARTIFACT,
+                    torch_version=torch.__version__,numpy_version=np.__version__,python_version=platform.python_version(),
+                    measured_links=copy.deepcopy(self.links))
+
+    def remember(self,peer):
+        if peer['id']==self.id:return
+        origin=urlsplit(peer['endpoint'])
+        if origin.scheme not in ('http','https') or not origin.hostname or origin.path or origin.username or origin.password:
+            raise ValueError('Invalid peer endpoint')
+        if len(peer['id'])>128:return
+        with self.lock:self.peers[peer['id']]=dict(peer,last_seen=time.time())
+
+    def members(self):
+        with self.lock:
+            return [self.description()]+[copy.deepcopy(p) for p in self.peers.values() if time.time()-p['last_seen']<10]
+
+    def propose(self,config):
+        validate_config(config)
+        members=config['members'];ids=[p['id'] for p in members]
+        if self.id not in ids:raise ValueError('This peer is not a member of the run')
+        if config['dataset_id']!=self.manifest['dataset_id'] or config['artifact_digest']!=ARTIFACT:
+            raise ValueError('Dataset or training artifact mismatch')
+        if config['threads']!=self.threads:raise ValueError('Thread allocation differs from experiment')
+        if any(p['backend']!=self.backend or p['torch_version']!=torch.__version__ or p['numpy_version']!=np.__version__ for p in members):
+            raise ValueError('All peers must use identical backend and PyTorch/NumPy versions')
+        mine=next(p for p in members if p['id']==self.id)
+        if mine['endpoint']!=self.endpoint or mine['host_id']!=self.capacity['host_id']:
+            raise ValueError('Local membership identity mismatch')
+        run_id=config['run_id'];fingerprint=digest(config)
+        with self.lock:
+            if run_id in self.runs:
+                if self.runs[run_id]['config_digest']!=fingerprint:raise ValueError('Conflicting run proposal')
+                return self.public(run_id)
+            if self.active is not None:raise ValueError('Another run is already active')
+            run=dict(id=run_id,status='ready',config=config,config_digest=fingerprint,rounds=[],commits={},
+                     created_at=time.time(),peer=self.description(),error=None)
+            self.runs[run_id]=run;self.active=run_id
+        threading.Thread(target=self.execute,args=(run_id,),daemon=True).start()
+        return self.public(run_id)
+
+    def public(self,run_id):
+        with self.lock:
+            run=self.runs[run_id]
+            return copy.deepcopy({k:v for k,v in run.items() if k not in ('commits','weights','optimizer_momentum')})
+
+    def local_train(self,payload):
+        if self.runner:
+            return self.runner.execute(payload,timeout=120,operation='cifar-train',memory_mb=self.capacity['offered_memory_mb'])
+        return train(payload,self.data)
+
+    def wait_for(self,member,path,deadline,predicate):
+        total=dict(seconds=0.,request_body_bytes=0,response_body_bytes=0)
+        while not self.stop.is_set() and time.monotonic()<deadline:
+            try:
+                value,metric=call(member['endpoint'],path,self.key,timeout=3)
+                for k in total:total[k]+=metric[k]
+                if value.get('status')=='failed':raise RuntimeError(f"Peer {member['name']} failed: {value.get('error')}")
+                if predicate(value):return value,total
+            except OSError:
+                pass
+            self.stop.wait(.1)
+        raise TimeoutError(f"Peer {member['name']} did not reach the round barrier")
+
+    def execute(self,run_id):
+        run=self.runs[run_id];config=run['config'];members=config['members'];index=[p['id'] for p in members].index(self.id)
+        root=self.directory/'runs'/run_id;root.mkdir(parents=True,exist_ok=True)
+        write_json(root/'config.json',config)
+        totals=dict(network_request_body_bytes=0,network_response_body_bytes=0,audit_seconds=0.,
+                    train_seconds=0.,evaluation_seconds=0.,barrier_seconds=0.,cpu_seconds=0.,samples=0)
+        rtts=[];network=[];audit_momenta={};momentum=None
+        try:
+            for member in members:
+                if member['id']!=self.id:
+                    self.wait_for(member,f'/v1/runs/{run_id}',time.monotonic()+60,
+                                  lambda value:value['status'] in ('ready','running','completed'))
+            initial=weights(model(config['seed'],self.threads));current=initial
+            run['initial_weight_digest']=hashlib.sha256(decode(initial).tobytes()).hexdigest()
+            run['status']='running';run['started_at']=time.time();started=time.perf_counter()
+            per_round=max(1,config['sync_samples']//len(members));round_id=0
+            shard_sizes=[len(range(i,config['train_limit'],len(members))) for i in range(len(members))]
+            initial_eval=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'])
+            run['initial_evaluation']=initial_eval;totals['evaluation_seconds']+=initial_eval['evaluation_seconds']
+            for epoch in range(config['epochs']):
+                for start in range(0,max(shard_sizes),per_round):
+                    if self.stop.is_set():raise RuntimeError('Peer stopped')
+                    round_started=time.perf_counter();round_network_seconds=0.;round_request=0;round_response=0
+                    peer_rtts=[]
+                    for member in members:
+                        if member['id']==self.id:continue
+                        _,metric=call(member['endpoint'],'/v1/ping',self.key,dict(nonce=secrets.token_hex(16)))
+                        rtts.append(metric['seconds']*1000);peer_rtts.append(metric['seconds']*1000)
+                        round_request+=metric['request_body_bytes'];round_response+=metric['response_body_bytes'];round_network_seconds+=metric['seconds']
+                    count=min(per_round,max(0,shard_sizes[index]-start))
+                    payload=dict(dataset_id=config['dataset_id'],seed=config['seed'],threads=self.threads,
+                        train_limit=config['train_limit'],peers=len(members),peer=index,epoch=epoch,start=start,count=count,
+                        batch_size=config['batch_size'],lr=config['lr'],momentum=config['momentum'],weights=current,
+                        optimizer_momentum=momentum)
+                    local_started=time.perf_counter()
+                    result=self.local_train(payload) if count else dict(weights=current,optimizer_momentum=momentum,
+                        count=0,train_loss=0.,train_accuracy=0.,train_seconds=0.,wall_seconds=0.,cpu_seconds=0.,peak_rss_mb=0.)
+                    local_seconds=time.perf_counter()-local_started
+                    commit=dict(run_id=run_id,round=round_id,peer_id=self.id,epoch=epoch,start=start,
+                        input_digest=digest({'weights':current,'epoch':epoch,'start':start}),artifact_digest=ARTIFACT,
+                        dataset_id=config['dataset_id'],result=result)
+                    with self.lock:run['commits'][str(round_id)]=commit
+                    contributions=[None]*len(members);contributions[index]=commit
+                    waited=time.perf_counter()
+                    for other,member in enumerate(members):
+                        if other==index:continue
+                        value,metric=self.wait_for(member,f'/v1/runs/{run_id}/rounds/{round_id}',time.monotonic()+180,
+                                                  lambda value:value.get('ready',False))
+                        contribution=value['commit'];expected=min(per_round,max(0,shard_sizes[other]-start))
+                        if any(contribution.get(k)!=commit[k] for k in ('run_id','round','epoch','start','input_digest','artifact_digest','dataset_id')) or contribution['peer_id']!=member['id']:
+                            raise ValueError('Stale or incorrectly bound peer update')
+                        received=contribution['result'];decode(received['weights'])
+                        if received['count']!=expected:raise ValueError('Incorrect contribution sample count')
+                        decode(received['optimizer_momentum']) if expected else None
+                        contributions[other]=contribution
+                        round_request+=metric['request_body_bytes'];round_response+=metric['response_body_bytes'];round_network_seconds+=metric['seconds']
+                    barrier_seconds=time.perf_counter()-waited
+                    audit_started=time.perf_counter()
+                    if config['audit']=='full':
+                        for other,contribution in enumerate(contributions):
+                            if other==index or not contribution['result']['count']:continue
+                            audit_payload=dict(payload,peer=other,count=contribution['result']['count'],optimizer_momentum=audit_momenta.get(other))
+                            reference=self.local_train(audit_payload)
+                            if not np.allclose(decode(reference['weights']),decode(contribution['result']['weights']),atol=1e-6,rtol=1e-5):
+                                raise ValueError('Independent local-SGD audit failed')
+                            if not np.allclose(decode(reference['optimizer_momentum']),decode(contribution['result']['optimizer_momentum']),atol=1e-6,rtol=1e-5):
+                                raise ValueError('Independent optimizer-state audit failed')
+                    audit_seconds=time.perf_counter()-audit_started if config['audit']=='full' else 0.
+                    total=sum(c['result']['count'] for c in contributions)
+                    # Fixed participant ordering gives every peer the same independent aggregation.
+                    accumulated=np.zeros(PARAMETERS,dtype=np.float64)
+                    for other,contribution in enumerate(contributions):
+                        update=contribution['result'];accumulated+=decode(update['weights']).astype(np.float64)*update['count']/total
+                        audit_momenta[other]=update['optimizer_momentum']
+                    current=encode(accumulated);momentum=result['optimizer_momentum']
+                    evaluation=evaluate(current,self.data,config['seed'],self.threads,config['test_limit'])
+                    round_wall=time.perf_counter()-round_started
+                    record=dict(round=round_id,epoch=epoch+1,local_samples=count,global_samples=total,
+                        train_loss=sum(c['result']['train_loss']*c['result']['count'] for c in contributions)/total,
+                        train_accuracy=sum(c['result']['train_accuracy']*c['result']['count'] for c in contributions)/total,
+                        test_accuracy=evaluation['test_accuracy'],test_loss=evaluation['test_loss'],macro_f1=evaluation['macro_f1'],
+                        local_compute_seconds=local_seconds,kernel_train_seconds=result['train_seconds'],
+                        audit_seconds=audit_seconds,evaluation_seconds=evaluation['evaluation_seconds'],
+                        barrier_seconds=barrier_seconds,network_seconds=round_network_seconds,
+                        rtt_mean_ms=sum(peer_rtts)/len(peer_rtts) if peer_rtts else 0.,
+                        request_body_bytes=round_request,response_body_bytes=round_response,
+                        effective_http_body_mbps=(round_request+round_response)*8/max(round_network_seconds,1e-9)/1e6,
+                        round_wall_seconds=round_wall,elapsed_seconds=time.perf_counter()-started,
+                        local_cpu_seconds=result['cpu_seconds'],local_peak_rss_mb=result['peak_rss_mb'],
+                        model_digest=hashlib.sha256(decode(current).tobytes()).hexdigest())
+                    run['rounds'].append(record)
+                    totals['network_request_body_bytes']+=round_request;totals['network_response_body_bytes']+=round_response
+                    for k,v in [('audit_seconds',audit_seconds),('train_seconds',local_seconds),('evaluation_seconds',evaluation['evaluation_seconds']),('barrier_seconds',barrier_seconds),('cpu_seconds',result['cpu_seconds']),('samples',count)]:totals[k]+=v
+                    with open(root/'rounds.jsonl','a') as stream:stream.write(json.dumps(record,allow_nan=False)+'\n')
+                    write_json(root/'checkpoint.json',dict(weights=current,optimizer_momentum=momentum,round=round_id,config_digest=run['config_digest']))
+                    print(f"{self.name}: epoch {epoch+1}/{config['epochs']} round {round_id} accuracy={evaluation['test_accuracy']:.2%} loss={evaluation['test_loss']:.4f}",flush=True)
+                    round_id+=1
+            elapsed=time.perf_counter()-started
+            run.update(status='completed',finished_at=time.time(),wall_seconds=elapsed,final_evaluation=evaluation,
+                totals=totals,rtt_ms=distribution(rtts),local_training_samples_per_second=totals['samples']/elapsed,
+                global_training_samples_per_second=config['train_limit']*config['epochs']/elapsed,
+                final_model_digest=hashlib.sha256(decode(current).tobytes()).hexdigest(),
+                environment=dict(torch=torch.__version__,numpy=np.__version__,python=platform.python_version(),platform=platform.platform()),
+                topology='single-host-peers' if len({p['host_id'] for p in members})==1 else 'separate-host-peers')
+        except Exception as exc:
+            run.update(status='failed',error=str(exc),finished_at=time.time())
+            print(f'{self.name}: run failed: {exc}',flush=True)
+        finally:
+            write_json(root/'summary.json',self.public(run_id));export_rounds(root/'rounds.csv',run['rounds'])
+            with self.lock:self.active=None
+
+
+def validate_config(config):
+    for key,low,high in [('epochs',1,100),('train_limit',2,50000),('test_limit',1,10000),('batch_size',1,512),('sync_samples',2,50000),('threads',1,32),('seed',0,2**31-1)]:
+        if type(config.get(key)) is not int or not low<=config[key]<=high:raise ValueError(f'Invalid {key}')
+    for key,low,high in [('lr',0,1),('momentum',0,1)]:
+        value=config.get(key)
+        if type(value) not in (int,float) or not math.isfinite(value) or not low<=value<high or (key=='lr' and value==0):raise ValueError(f'Invalid {key}')
+    if config.get('audit') not in ('full','none'):raise ValueError('Unknown audit policy')
+    members=config.get('members',[])
+    if not 1<=len(members)<=8 or len({p['id'] for p in members})!=len(members):raise ValueError('Invalid membership')
+    if config['train_limit']<len(members):raise ValueError('Too few samples for membership')
+    if config['sync_samples']<len(members):raise ValueError('Sync samples must cover all peers')
+    if members!=sorted(members,key=lambda p:p['id']):raise ValueError('Membership ordering must be deterministic')
+    if not isinstance(config.get('run_id'),str) or not config['run_id'].isalnum() or len(config['run_id'])>64:raise ValueError('Invalid run ID')
+
+
+def handler_for(peer):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def send(self,value,status=200,authenticated=True):
+            if authenticated:
+                nonce=self.headers.get('X-MTCP-Nonce','')
+                value={'value':value,'nonce':nonce,'mac':sign({'nonce':nonce,'value':value},peer.key)}
+            raw=canonical(value);self.send_response(status);self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(raw)
+        def authorized(self):
+            return secrets.compare_digest(self.headers.get('Authorization',''),f'Bearer {peer.key}')
+        def do_GET(self):
+            if self.path=='/health':self.send({'status':'ok'},authenticated=False);return
+            if self.path=='/v1/resources':self.send(peer.description(),authenticated=False);return
+            if self.path=='/v1/peers':self.send({'peers':peer.members()},authenticated=False);return
+            if not self.authorized():self.send({'error':'Invalid experiment key'},401);return
+            parts=self.path.strip('/').split('/')
+            try:
+                if len(parts)==3 and parts[:2]==['v1','runs']:self.send(peer.public(parts[2]));return
+                if len(parts)==5 and parts[:2]==['v1','runs'] and parts[3]=='rounds':
+                    with peer.lock:
+                        run=peer.runs[parts[2]];commit=run['commits'].get(parts[4])
+                        self.send({'ready':commit is not None,'commit':commit,'status':run['status'],'error':run.get('error')});return
+                self.send({'error':'Not found'},404)
+            except KeyError:self.send({'error':'Unknown run'},404)
+        def do_POST(self):
+            if not self.authorized():self.send({'error':'Invalid experiment key'},401);return
+            self.connection.settimeout(10)
+            try:
+                length=int(self.headers.get('Content-Length',0))
+                if not 0<length<=300000:raise ValueError('Invalid control request size')
+                value=json.loads(self.rfile.read(length))
+                if self.path=='/v1/hello':peer.remember(value['peer']);self.send({'peer':peer.description()})
+                elif self.path=='/v1/ping':self.send({'echo':value,'peer_id':peer.id})
+                elif self.path=='/v1/bandwidth':
+                    count=value.get('download_bytes',0)
+                    if type(count) is not int or not 0<=count<=131072:raise ValueError('Invalid probe size')
+                    self.send({'peer_id':peer.id,'padding':'x'*count})
+                elif self.path=='/v1/runs':self.send(peer.propose(value),202)
+                else:self.send({'error':'Not found'},404)
+            except (ValueError,KeyError,TypeError) as exc:self.send({'error':str(exc)},400)
+    return Handler
+
+
+def serve(args):
+    key=os.environ.get('MTCP_CLUSTER_KEY','')
+    if len(key)<32:raise ValueError('Set MTCP_CLUSTER_KEY to the same random key (at least 32 characters) on all intended peers')
+    cpus=[int(c) for c in args.cpus.split(',')] if args.cpus else sorted(os.sched_getaffinity(0))[:args.threads]
+    if len(cpus)<args.threads or not set(cpus)<=set(os.sched_getaffinity(0)):raise ValueError('Invalid CPU allocation')
+    os.sched_setaffinity(0,cpus)
+    peer=Peer(args.state_dir or f'.mtcp/cifar-peer-{args.port}',args.data,key,args.name,cpus,args.threads,args.backend,args.assets,args.memory_mb)
+    server=ThreadingHTTPServer((args.host,args.port),handler_for(peer));peer.endpoint=f'http://{args.advertise_host or discover_host()}:{server.server_port}'
+    def explicit_hello():
+        while not peer.stop.is_set():
+            for endpoint in args.connect:
+                try:
+                    value,_=call(endpoint,'/v1/hello',key,{'peer':peer.description()});peer.remember(value['peer'])
+                except (OSError,ValueError,KeyError):pass
+            peer.stop.wait(2)
+    def measure_links():
+        while not peer.stop.is_set():
+            if peer.active is None:
+                for member in peer.members():
+                    if member['id']==peer.id or time.time()-peer.links.get(member['id'],{}).get('measured_at',0)<30:continue
+                    try:
+                        _,ping=call(member['endpoint'],'/v1/ping',key,{'nonce':secrets.token_hex(16)})
+                        _,down=call(member['endpoint'],'/v1/bandwidth',key,{'download_bytes':131072})
+                        _,up=call(member['endpoint'],'/v1/bandwidth',key,{'padding':'x'*131072})
+                        peer.links[member['id']]=dict(rtt_ms=ping['seconds']*1000,
+                            upload_mbps=up['request_body_bytes']*8/up['seconds']/1e6,
+                            download_mbps=down['response_body_bytes']*8/down['seconds']/1e6,
+                            measured_at=time.time(),method='128 KiB authenticated HTTP body transfers, including RTT')
+                    except (OSError,ValueError,KeyError):pass
+            peer.stop.wait(2)
+    if not args.no_discovery:
+        discovery=Discovery(peer.description,peer.remember,key,peer.stop,args.discovery_port);discovery.start()
+    threading.Thread(target=explicit_hello,daemon=True).start()
+    threading.Thread(target=measure_links,daemon=True).start()
+    print(f'{peer.name} [{peer.id}] advertising at {peer.endpoint}; every peer trains and aggregates',flush=True)
+    def stop(*_):raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM,stop)
+    try:server.serve_forever()
+    except KeyboardInterrupt:pass
+    finally:peer.stop.set();server.server_close()

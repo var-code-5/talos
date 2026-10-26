@@ -1,5 +1,10 @@
 # MTCP Compute Lab
 
+The current CIFAR-10 application uses **equal peers**, automatic authenticated LAN
+discovery, and independent training/aggregation on every laptop. Start with
+[the CIFAR peer setup and comparison guide](docs/cifar-peers.md). The linear
+coordinator prototype below remains a separate compatibility demonstration.
+
 A runnable implementation of the protocol in
 [VIT_IDF_B_MTCP_Complete_Draft.md](VIT_IDF_B_MTCP_Complete_Draft.md).
 Volunteers advertise resources and accept authenticated inbound work. The requester
