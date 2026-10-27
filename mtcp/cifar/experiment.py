@@ -15,6 +15,7 @@ def public(endpoint,route):
 
 
 def start(args):
+    startup=time.perf_counter()
     key=os.environ.get('MTCP_CLUSTER_KEY','')
     if len(key)<32:raise ValueError('Set MTCP_CLUSTER_KEY to the peers\' shared experiment key')
     deadline=time.monotonic()+args.discovery_wait
@@ -36,6 +37,11 @@ def start(args):
         if value['peer']['id']!=member['id']:raise ValueError('Peer endpoint identity changed')
         verified.append(value['peer'])
     members=sorted(verified,key=lambda p:p['id'])
+    allocation=getattr(args,'allocation','equal')
+    indexing=getattr(args,'indexing_version',None) or (2 if allocation=='compute-aware' else 1)
+    if allocation=='compute-aware' and indexing!=2:raise ValueError('Compute-aware allocation requires indexing version 2')
+    if indexing==2 and any(1 not in p.get('allocation_protocols',[]) for p in members):
+        raise ValueError('Update and restart every peer to support compute-aware allocation')
     first=members[0]
     numerics=getattr(args,'numerics','fp64-portable')
     for member in members:
@@ -56,8 +62,20 @@ def start(args):
         test_limit=args.test_limit,batch_size=args.batch_size,sync_samples=args.sync_samples,
         threads=args.threads,seed=args.seed,lr=args.lr,momentum=args.momentum,audit=args.audit,
         dataset_id=first['dataset_id'],artifact_digest=first['artifact_digest'],initial_weights=initial,numerics=numerics)
+    if indexing==2:
+        from .allocation import SETTINGS
+        from mtcp.kernel import digest
+        config.update(allocation=allocation,indexing_version=2,planner=SETTINGS)
+        request_digest=digest(config)
+        # Independent calibration can run concurrently without serializing the
+        # startup cost of one laptop behind another.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(members)) as pool:
+            futures=[pool.submit(call,m['endpoint'],'/v1/calibrate',key,{'config':config},timeout=700) for m in members]
+            calibration=[future.result()[0] for future in futures]
+        config.update(calibration=calibration,calibration_request_digest=request_digest,startup_seconds=time.perf_counter()-startup)
     for member in members:call(member['endpoint'],'/v1/runs',key,config)
-    print(f"Started {config['run_id']} on {len(members)} equal peers; no peer is a permanent coordinator",flush=True)
+    print(f"Started {config['run_id']} on {len(members)} peers ({allocation} allocation); no peer is a permanent coordinator",flush=True)
     if args.no_wait:return config['run_id']
     return collect(config,key,args.output)
 
@@ -82,7 +100,8 @@ def collect(config,key,output):
     result=dict(config=config,peers=states,status='completed',peer_models_identical=len(digests)==1,
                 topology=states[0]['topology'],wall_seconds=max(s['wall_seconds'] for s in states),
                 test_accuracy=states[0]['final_evaluation']['test_accuracy'],
-                test_loss=states[0]['final_evaluation']['test_loss'])
+                test_loss=states[0]['final_evaluation']['test_loss'],
+                end_to_end_seconds=max(s.get('end_to_end_seconds',s['wall_seconds']) for s in states))
     location=Path(output)/run_id/'experiment.json';write_json(location,result)
     print(f"Saved {location}; accuracy={result['test_accuracy']:.2%}; peer models identical={result['peer_models_identical']}",flush=True)
     if len(digests)!=1:raise RuntimeError('Peers disagree on the final aggregated model')

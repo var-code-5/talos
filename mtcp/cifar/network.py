@@ -15,6 +15,8 @@ from mtcp.transport import NoRedirect
 
 GROUP='239.255.77.67'
 PORT=47767
+# Up to 500 rounds with eight peers' measured costs and the initial checkpoint.
+MAX_RESPONSE_BYTES=8*1024*1024
 
 
 def call(endpoint, route, key, body=None, timeout=10):
@@ -26,9 +28,9 @@ def call(endpoint, route, key, body=None, timeout=10):
         urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=os.environ.get('MTCP_CA_FILE'))))
     start=time.perf_counter()
     with opener.open(request,timeout=timeout) as response:
-        raw=response.read(1048577)
+        raw=response.read(MAX_RESPONSE_BYTES+1)
     elapsed=time.perf_counter()-start
-    if len(raw)>1048576:raise ValueError('Oversized peer response')
+    if len(raw)>MAX_RESPONSE_BYTES:raise ValueError('Oversized peer response')
     envelope=json.loads(raw)
     value=envelope['value']
     if envelope.get('nonce')!=nonce or not authenticated({'nonce':nonce,'value':value},envelope.get('mac'),key):

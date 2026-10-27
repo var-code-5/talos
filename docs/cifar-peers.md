@@ -295,3 +295,111 @@ rebuild the CIFAR guest image because the execution artifact changed.
 Audit failure messages now include maximum errors. Per-round evidence is saved
 under the peer's `runs/RUN_ID/audits/`, and submitted local states are persisted in
 `commits/` for investigation after restart. No failed audited update is aggregated.
+
+## Compute-aware allocation (experimental)
+
+Update and restart **every peer** before using the new policy. Existing commands
+still use equal allocation and legacy strided data indexing. Compute-aware runs
+measure the actual CIFAR kernel at each peer's offered CPU/thread budget, backend,
+and numerical profile; hardware core counts and the linear benchmark do not set
+training shares.
+
+```sh
+.venv-cifar/bin/python -m mtcp.cifar run --peers 2 --epochs 10 --seed 42 \
+  --audit full --numerics fp64-portable --allocation compute-aware
+```
+
+For a controlled allocation comparison, use a new equal run with the same global
+window indexing and phase agreement protocol:
+
+```sh
+.venv-cifar/bin/python -m mtcp.cifar run --peers 2 --epochs 10 --seed 42 \
+  --audit full --numerics fp64-portable --allocation equal --indexing-version 2
+```
+
+Copy that control's `initial.json` and add `--initial-checkpoint PATH` to the
+compute-aware command. Keep peers, CPU affinities, threads, data, numerical
+profile, audit policy and global round budget identical. Compare the collected
+artifacts explicitly:
+
+```sh
+.venv-cifar/bin/python -m mtcp.cifar compare \
+  results/cifar/EQUAL_RUN/experiment.json results/cifar/AWARE_RUN/experiment.json \
+  --allocation-comparison --output results/cifar/allocation-comparison
+```
+
+Calibration uses one warm-up plus three measured executions (up to 512 examples)
+and an evaluation, with a 120-second deadline per isolated task. It never updates
+the experiment model or momentum. Interpreter startup is counted as calibration
+overhead, while Firecracker boot is a real recurring task setup cost. Admission
+binds each peer's own calibration into the configuration. Invalid, missing or
+unsupported measurements fail before training. Calibration and discovery overhead
+are included in `end_to_end_seconds`; `wall_seconds` measures peer execution.
+
+Version-2 indexing shuffles the selected examples globally per epoch, then splits
+each synchronization window into disjoint ranges. Exactly every selected example
+is trained once per epoch; tiny remainder windows can assign zero samples to a
+peer. That peer preserves momentum and contributes zero aggregation weight.
+Per-peer momentum persists when shares change. Unequal numbers of local SGD steps
+change the optimization trajectory: compare accuracy and loss alongside runtime,
+without expecting the equal-policy final model to match the compute-aware model.
+All peers within a single run must still agree on every aggregate model hash.
+
+Without audits and with negligible fixed cost, shares approach measured samples
+per second. With full audits the planner minimizes the predicted training barrier
+plus the slowest replay-and-evaluation phase. Every peer recomputes all remote
+samples under full auditing, so redistribution may offer little or no speedup;
+`audit_limited` reports this condition. Auditing is never reduced automatically.
+The planner uses integer microsecond costs, deterministic batch rounding, a
+10,000-candidate search limit, EWMA alpha 0.2, per-observation cost clipping to
+0.5–2 times the previous estimate, and a 2% minimum predicted improvement. Share
+changes are limited to 10 percentage points (rounded to a batch when necessary)
+relative to the previous proportions. Initial calibration allocation is exempt.
+Short epoch tails preserve the last full-window shares and do not update
+per-sample rates from less than one batch of work.
+All peers acknowledge the same next plan; a missing peer or disagreement fails
+the run instead of silently changing membership.
+
+The status page shows assigned counts, predicted compute phases and update,
+completion and plan waits. `update_polling_seconds` includes unsuccessful HTTP
+polls, retry delays and polling predicate overhead; `update_transfer_seconds`
+measures the successful authenticated update request. Local update validation is
+recorded separately. `barrier_seconds` covers their enclosing update exchange.
+Completion and plan-agreement waits include their HTTP exchange. Network durations
+can overlap those enclosing phases; **do not add them twice or interpret these
+measurements as CPU idle time**. Runtime comparisons include all phase waits and
+calibration. This feature remains experimental until physical paired trials
+establish runtime and quality results.
+
+Firecracker users must rebuild with `tools/firecracker/prepare_cifar.py`; the
+training artifact now binds both kernel and allocation code. Roll back by starting
+a new equal run, without changing policy on a running experiment. Archived legacy
+runs remain readable and keep their original indexing semantics.
+
+To run the full paired validation automatically after both peers are updated:
+
+```sh
+.venv-cifar/bin/python -m tools.cifar.paired_allocation
+```
+
+This runs both policies for seeds 42, 43 and 44, alternates their order, reuses
+exact initial tensors within each pair, and saves `assessment.json` plus HTML,
+CSV and JSON comparisons under `results/cifar-allocation-paired/`. Its release
+assessment requires physical peers, the full workload, at least a 10% median
+runtime reduction including calibration, and at most one percentage point mean
+accuracy regression. A small connectivity/audit trial uses:
+
+```sh
+.venv-cifar/bin/python -m tools.cifar.paired_allocation --epochs 2 \
+  --train-limit 10000 --test-limit 1000 --seeds 42 \
+  --output results/cifar-allocation-smoke
+```
+
+For a repeatable local speed-imbalance check with a synthetic delay kernel:
+
+```sh
+.venv-cifar/bin/python -m tools.cifar.validate_allocation
+```
+
+That check produces `results/cifar-allocation-validation/synthetic.json`. It is
+not a CIFAR accuracy result or a physical two-laptop performance measurement.

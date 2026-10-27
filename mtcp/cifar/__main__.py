@@ -20,6 +20,8 @@ def main():
     peer.add_argument('--backend',choices=['process','firecracker'],default='process')
     peer.add_argument('--assets',default='.mtcp/firecracker-cifar');peer.add_argument('--memory-mb',type=int,default=768)
     run=commands.add_parser('run',help='Propose an experiment from either peer; all peers train and aggregate')
+    run.add_argument('--allocation',choices=['equal','compute-aware'],default='equal')
+    run.add_argument('--indexing-version',type=int,choices=[1,2],help='Use 2 for equal controls of compute-aware runs')
     run.add_argument('--endpoint',default='http://127.0.0.1:9101');run.add_argument('--peers',type=int,default=2)
     run.add_argument('--epochs',type=int,default=10);run.add_argument('--train-limit',type=int,default=50000)
     run.add_argument('--test-limit',type=int,default=10000);run.add_argument('--batch-size',type=int,default=32)
@@ -32,6 +34,7 @@ def main():
     run.add_argument('--output',default='results/cifar')
     report=commands.add_parser('compare',help='Compare compatible experiment artifacts')
     report.add_argument('runs',nargs='+');report.add_argument('--output',default='results/cifar/comparison')
+    report.add_argument('--allocation-comparison',action='store_true')
     collection=commands.add_parser('collect',help='Collect an existing asynchronous run from the peers')
     collection.add_argument('--endpoint',default='http://127.0.0.1:9101')
     collection.add_argument('--run-id',required=True);collection.add_argument('--output',default='results/cifar')
@@ -58,7 +61,7 @@ def main():
         start(args)
     elif args.command=='compare':
         from .report import compare
-        print(compare(args.runs,args.output))
+        print(compare(args.runs,args.output,allocation_comparison=args.allocation_comparison))
     elif args.command=='collect':
         import os
         from .network import call

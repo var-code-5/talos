@@ -41,7 +41,7 @@ class PeerTests(unittest.TestCase):
 
     def test_symmetric_discovery_training_and_report(self):
         from argparse import Namespace
-        from mtcp.cifar.experiment import start,public
+        from mtcp.cifar.experiment import start,public,collect
         from mtcp.cifar.network import call
         from mtcp.cifar.report import compare
         with tempfile.TemporaryDirectory() as temporary:
@@ -69,6 +69,9 @@ class PeerTests(unittest.TestCase):
                     self.fail('Equal peers did not discover each other')
                 with self.assertRaises(urllib.error.HTTPError) as denied:
                     call(endpoints[0],'/v1/runs','wrong-key',{})
+                self.assertEqual(denied.exception.code,401);denied.exception.close()
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    call(endpoints[0],'/v1/calibrate','wrong-key',{'config':{}})
                 self.assertEqual(denied.exception.code,401);denied.exception.close()
                 args=Namespace(endpoint=endpoints[1],peers=2,discovery_wait=5,epochs=2,
                     train_limit=128,test_limit=64,batch_size=16,sync_samples=64,threads=1,
@@ -108,6 +111,42 @@ class PeerTests(unittest.TestCase):
                 bad=json.loads(Path(artifact).read_text());bad['config']['numerics']='fp32-native'
                 bad_path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):compare([artifact,str(bad_path)],str(Path(temporary)/'bad-numerics'))
+                # Version-2 equal and measured allocation exercise the actual
+                # calibration endpoint, exact replay and all-peer agreement.
+                args.epochs=2;args.train_limit=65;args.sync_samples=64
+                args.allocation='equal';args.indexing_version=2
+                control=start(args)
+                args.allocation='compute-aware'
+                args.no_wait=True
+                proposed=start(args)
+                value,_=call(endpoints[0],f'/v1/runs/{proposed}',key)
+                measured=collect(value['config'],key,args.output)
+                control_run=json.loads(Path(control).read_text())
+                measured_run=json.loads(Path(measured).read_text())
+                self.assertTrue(measured_run['peer_models_identical'])
+                self.assertGreater(measured_run['end_to_end_seconds'],measured_run['wall_seconds'])
+                for node in measured_run['peers']:
+                    self.assertEqual(len(node['rounds']),4)
+                    self.assertTrue(node['last_audit']['passed'])
+                    self.assertEqual(sum(r['global_samples'] for r in node['rounds']),130)
+                    self.assertTrue(any(r['local_samples']==0 for r in measured_run['peers'][0]['rounds']) or
+                                    any(r['local_samples']==0 for r in measured_run['peers'][1]['rounds']))
+                with self.assertRaises(ValueError):compare([control,measured],str(Path(temporary)/'policy-mismatch'))
+                comparison=compare([control,measured],str(Path(temporary)/'allocation'),allocation_comparison=True)
+                self.assertIn('Unequal local SGD',Path(comparison).read_text())
+                mismatch=json.loads(Path(measured).read_text())
+                mismatch['config']['members'][0]['resources']['cpu_affinity']=[99999]
+                changed=Path(temporary)/'changed-hardware.json';changed.write_text(json.dumps(mismatch))
+                with self.assertRaises(ValueError):compare([control,str(changed)],str(Path(temporary)/'hardware-mismatch'),allocation_comparison=True)
+                from mtcp.cifar.peer import Peer
+                restored=Peer(Path(temporary)/'peer-0',os.environ.get('MTCP_CIFAR_DATA','.mtcp/cifar10'),key,'restored',[cpus[0]])
+                self.assertEqual(restored.runs[proposed]['assignment']['plan_digest'],measured_run['peers'][0]['rounds'][-1]['plan_digest'])
+                body=public(endpoints[0],'/v1/status')
+                self.assertEqual(body['runs'][0]['allocation'],'compute-aware')
+                # Stored local calibration prevents replacement by the proposer.
+                forged=json.loads(Path(measured).read_text())['config']
+                forged['calibration'][0]['cost']['train_us']+=1
+                with self.assertRaises(urllib.error.HTTPError):call(forged['members'][0]['endpoint'],'/v1/runs',key,forged)
                 status=public(endpoints[0],'/v1/status')
                 self.assertEqual(status['runs'][0]['rounds'],4)
                 with urllib.request.urlopen(endpoints[0]) as response:

@@ -35,7 +35,7 @@ class Peer:
         self.id=json.loads(identity_path.read_text())['id'];self.name=name
         self.data=str(Path(data).resolve());self.manifest=load_manifest(self.data,verify=True)
         self.key=key;self.threads=threads;self.backend=backend;self.stop=threading.Event()
-        self.lock=threading.RLock();self.peers={};self.runs={};self.active=None;self.links={}
+        self.lock=threading.RLock();self.peers={};self.runs={};self.active=None;self.links={};self.calibrations={}
         self.capacity=advertise(cpus,memory_mb,100,100,'kvm-microvm' if backend=='firecracker' else 'trusted-cifar-process')
         self.capacity.update(offered_upload_mbps=None,offered_download_mbps=None,
             bandwidth_source='Uncapped; measured peer links are advertised separately',
@@ -67,7 +67,7 @@ class Peer:
                     resources=self.capacity,threads=self.threads,backend=self.backend,
                     dataset_id=self.manifest['dataset_id'],artifact_digest=ARTIFACT,
                     torch_version=torch.__version__,numpy_version=np.__version__,python_version=platform.python_version(),
-                    measured_links=links,numerics_supported=list(NUMERICS))
+                    measured_links=links,numerics_supported=list(NUMERICS),allocation_protocols=[1],indexing_versions=[1,2])
 
     def refresh_endpoint(self):
         # A run's membership is fixed. Refresh DHCP changes only between runs.
@@ -99,6 +99,14 @@ class Peer:
         mine=next(p for p in members if p['id']==self.id)
         if mine['endpoint']!=self.endpoint or mine['host_id']!=self.capacity['host_id']:
             raise ValueError('Local membership identity mismatch')
+        if config.get('indexing_version',1)==2:
+            from .allocation import SETTINGS
+            if any(1 not in p.get('allocation_protocols',[]) for p in members):
+                raise ValueError('All peers need an allocation protocol update and restart')
+            if config.get('planner')!=SETTINGS:raise ValueError('Unsupported planner settings')
+            local_record=config['calibration'][ids.index(self.id)]
+            expected=self.calibrations.get(config['calibration_request_digest'])
+            if local_record!=expected:raise ValueError('Local calibration was changed or is unavailable; recalibrate')
         run_id=config['run_id'];fingerprint=digest(config)
         with self.lock:
             if run_id in self.runs:
@@ -106,7 +114,7 @@ class Peer:
                 return self.public(run_id)
             if self.active is not None:raise ValueError('Another run is already active')
             run=dict(id=run_id,status='ready',config=config,config_digest=fingerprint,rounds=[],commits={},
-                     created_at=time.time(),peer=self.description(),error=None)
+                     created_at=time.time(),peer=self.description(),error=None,plans={},completions={})
             self.runs[run_id]=run;self.active=run_id
         threading.Thread(target=self.execute,args=(run_id,),daemon=True).start()
         return self.public(run_id)
@@ -114,7 +122,7 @@ class Peer:
     def public(self,run_id):
         with self.lock:
             run=self.runs[run_id]
-            return dict(copy.deepcopy({k:v for k,v in run.items() if k not in ('commits','weights','optimizer_momentum')}),
+            return dict(copy.deepcopy({k:v for k,v in run.items() if k not in ('commits','weights','optimizer_momentum','plans','completions')}),
                         accepting_runs=self.active is None)
 
     def local_train(self,payload):
@@ -136,6 +144,9 @@ class Peer:
         raise TimeoutError(f"Peer {member['name']} did not reach the round barrier")
 
     def execute(self,run_id):
+        if self.runs[run_id]['config'].get('indexing_version',1)==2:
+            from .execution import execute
+            return execute(self,run_id)
         run=self.runs[run_id];config=run['config'];members=config['members'];index=[p['id'] for p in members].index(self.id)
         root=self.directory/'runs'/run_id;root.mkdir(parents=True,exist_ok=True)
         (root/'commits').mkdir(exist_ok=True)
@@ -267,7 +278,7 @@ class Peer:
             with self.lock:self.active=None
 
 
-def validate_config(config):
+def validate_config(config,require_calibration=True):
     for key,low,high in [('epochs',1,100),('train_limit',2,50000),('test_limit',1,10000),('batch_size',1,512),('sync_samples',2,50000),('threads',1,32),('seed',0,2**31-1)]:
         if type(config.get(key)) is not int or not low<=config[key]<=high:raise ValueError(f'Invalid {key}')
     for key,low,high in [('lr',0,1),('momentum',0,1)]:
@@ -280,7 +291,29 @@ def validate_config(config):
     if not 1<=len(members)<=8 or len({p['id'] for p in members})!=len(members):raise ValueError('Invalid membership')
     if config['train_limit']<len(members):raise ValueError('Too few samples for membership')
     if config['sync_samples']<len(members):raise ValueError('Sync samples must cover all peers')
-    planned_rounds=config['epochs']*math.ceil(math.ceil(config['train_limit']/len(members))/(config['sync_samples']//len(members)))
+    version=config.get('indexing_version',1)
+    if type(version) is not int or version not in (1,2):raise ValueError('Unsupported indexing version')
+    policy=config.get('allocation','equal')
+    if policy not in ('equal','compute-aware') or (policy=='compute-aware' and version!=2):raise ValueError('Invalid allocation policy/indexing version')
+    if version==2:
+        from .allocation import SETTINGS,validate_cost
+        if config.get('planner')!=SETTINGS:raise ValueError('Unsupported planner settings')
+        if require_calibration:
+            request={k:v for k,v in config.items() if k not in ('calibration','calibration_request_digest','startup_seconds')}
+            if digest(request)!=config.get('calibration_request_digest'):raise ValueError('Calibration configuration was changed')
+            calibration=config.get('calibration',[])
+            if len(calibration)!=len(members):raise ValueError('Missing calibration records')
+            for member,record in zip(members,calibration):
+                if record.get('peer_id')!=member['id'] or record.get('request_digest')!=config.get('calibration_request_digest'):
+                    raise ValueError('Calibration identity mismatch')
+                validate_cost(record['cost'])
+                from .calibration import measured_us
+                measured_us(record['seconds'],positive=True)
+            from .calibration import measured_us
+            measured_us(config.get('startup_seconds'),positive=True)
+        planned_rounds=config['epochs']*math.ceil(config['train_limit']/config['sync_samples'])
+    else:
+        planned_rounds=config['epochs']*math.ceil(math.ceil(config['train_limit']/len(members))/(config['sync_samples']//len(members)))
     if planned_rounds>500:raise ValueError('This prototype supports at most 500 rounds; increase --sync-samples')
     if members!=sorted(members,key=lambda p:p['id']):raise ValueError('Membership ordering must be deterministic')
     if not isinstance(config.get('run_id'),str) or not config['run_id'].isalnum() or len(config['run_id'])>64:raise ValueError('Invalid run ID')
@@ -313,7 +346,8 @@ def handler_for(peer):
                             rounds=len(run['rounds']),latest=run['rounds'][-1] if run['rounds'] else None,
                             epochs=run['config']['epochs'],train_limit=run['config']['train_limit'],
                             peers=len(run['config']['members']),audit=run['config']['audit'],
-                            numerics=run['config'].get('numerics','fp32-native'),backend=run['peer']['backend']))
+                            numerics=run['config'].get('numerics','fp32-native'),backend=run['peer']['backend'],
+                            allocation=run['config'].get('allocation','equal'),assignment=run.get('assignment')))
                 self.send({'self':peer.description(),'peers':peer.members(),'runs':summaries},authenticated=False);return
             if self.path=='/health':self.send({'status':'ok'},authenticated=False);return
             if self.path=='/v1/resources':self.send(peer.description(),authenticated=False);return
@@ -322,6 +356,12 @@ def handler_for(peer):
             parts=self.path.strip('/').split('/')
             try:
                 if len(parts)==3 and parts[:2]==['v1','runs']:self.send(peer.public(parts[2]));return
+                if len(parts)==6 and parts[:2]==['v1','runs'] and parts[3]=='evidence':
+                    if parts[4] not in ('plans','completions') or not parts[5].isdigit():raise ValueError('Invalid evidence request')
+                    with peer.lock:
+                        run=peer.runs[parts[2]];record=run.get(parts[4],{}).get(parts[5])
+                        response=dict(ready=record is not None,record=record,status=run['status'],error=run.get('error'))
+                    self.send(response);return
                 if len(parts)==5 and parts[:2]==['v1','runs'] and parts[3]=='rounds':
                     if not parts[4].isdigit():self.send({'error':'Invalid round'},400);return
                     with peer.lock:
@@ -332,6 +372,7 @@ def handler_for(peer):
                     self.send(response);return
                 self.send({'error':'Not found'},404)
             except KeyError:self.send({'error':'Unknown run'},404)
+            except (ValueError,TypeError) as exc:self.send({'error':str(exc)},400)
         def do_POST(self):
             if not self.authorized():self.send({'error':'Invalid experiment key'},401);return
             self.connection.settimeout(10)
@@ -352,6 +393,9 @@ def handler_for(peer):
                     count=value.get('download_bytes',0)
                     if type(count) is not int or not 0<=count<=131072:raise ValueError('Invalid probe size')
                     self.send({'peer_id':peer.id,'padding':'x'*count})
+                elif self.path=='/v1/calibrate':
+                    from .calibration import calibrate
+                    self.send(calibrate(peer,value))
                 elif self.path=='/v1/runs':self.send(peer.propose(value),202)
                 else:self.send({'error':'Not found'},404)
             except (ValueError,KeyError,TypeError) as exc:self.send({'error':str(exc)},400)

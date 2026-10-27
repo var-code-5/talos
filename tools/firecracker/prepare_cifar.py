@@ -39,6 +39,7 @@ def main():
         (context/'mtcp').mkdir();(context/'mtcp/__init__.py').write_text('')
         shutil.copytree(ROOT/'mtcp/cifar',context/'mtcp/cifar',ignore=shutil.ignore_patterns('__pycache__'))
         shutil.copyfile(ROOT/'mtcp/kernel.py',context/'kernel.py')
+        shutil.copyfile(ROOT/'mtcp/kernel.py',context/'mtcp/kernel.py')
         shutil.copyfile(ROOT/'mtcp/host.py',context/'mtcp/host.py')
         shutil.copyfile(ROOT/'guest/init.py',context/'mtcp-init')
         # Keep data out of the Docker context until dependency layers are built.
@@ -65,7 +66,7 @@ RUN chmod 755 /sbin/mtcp-init && mkdir -p /data /proc /sys /dev /tmp
         with open(target/'rootfs.ext4','wb') as stream:stream.truncate(1536*1024**2)
         subprocess.run(['mke2fs','-q','-t','ext4','-F','-d',str(root),str(target/'rootfs.ext4')],check=True)
         guest_digest=sha(context/'mtcp-init')
-        cifar_digest=sha(context/'mtcp/cifar/training.py')
+        cifar_digest=ARTIFACT
     result=dict(version=base_manifest['version'],image=IMAGE,artifact_digest=LINEAR_ARTIFACT,
         guest_digest=guest_digest,cifar_artifact_digest=cifar_digest,dataset_id=manifest['dataset_id'],
         files={name:sha(target/name) for name in ('firecracker','vmlinux','rootfs.ext4')})

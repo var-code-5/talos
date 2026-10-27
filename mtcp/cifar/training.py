@@ -11,9 +11,10 @@ from torch import nn
 from torch.nn import functional as F
 from .data import arrays, load_manifest
 from mtcp.host import peak_rss_mb
+from .allocation import validate_plan
 
 PARAMETERS = 22058
-ARTIFACT = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+ARTIFACT = hashlib.sha256(Path(__file__).read_bytes() + Path(__file__).with_name('allocation.py').read_bytes()).hexdigest()
 NUMERICS = ('fp32-native', 'fp64-portable')
 
 
@@ -76,6 +77,16 @@ def indices(seed, train_limit, peers, peer, epoch, start, count):
     return order[start:start+count]
 
 
+def global_indices(seed, train_limit, epoch, start, count):
+    if any(type(x) is not int for x in (seed,train_limit,epoch,start,count)) or not 1 <= train_limit <= 50000 or not 0 <= epoch <= 10000:
+        raise ValueError('Invalid global partition')
+    if not 0 <= start <= train_limit or not 0 <= count <= train_limit-start:
+        raise ValueError('Task exceeds global epoch window')
+    chosen = np.random.default_rng(seed).permutation(50000)[:train_limit]
+    order = np.random.default_rng(seed + 1009*epoch).permutation(chosen)
+    return order[start:start+count]
+
+
 def batch(images, labels, selected, dtype=torch.float32):
     x = torch.from_numpy(np.array(images[selected],copy=True)).to(dtype).div_(255).sub_(.5).div_(.5)
     y = torch.from_numpy(np.array(labels[selected],dtype=np.int64,copy=True))
@@ -99,8 +110,14 @@ def train(payload, directory):
             count=p.numel()
             optimizer.state[p]['momentum_buffer']=torch.from_numpy(flat[offset:offset+count].reshape(p.shape).copy()).to(p.dtype)
             offset+=count
-    selected = indices(payload['seed'],payload['train_limit'],payload['peers'],payload['peer'],
-                       payload['epoch'],payload['start'],payload['count'])
+    if payload.get('indexing_version',1)==2:
+        validate_plan(payload['plan'],payload,hashlib.sha256(decode(payload['weights']).tobytes()).hexdigest())
+        selected = global_indices(payload['seed'],payload['train_limit'],payload['epoch'],payload['start'],payload['count'])
+    elif payload.get('indexing_version',1)==1:
+        selected = indices(payload['seed'],payload['train_limit'],payload['peers'],payload['peer'],
+                           payload['epoch'],payload['start'],payload['count'])
+    else:
+        raise ValueError('Unsupported indexing version')
     images,labels=arrays(directory,'train')
     loaded=time.perf_counter(); total_loss=0.; correct=0
     net.train()
